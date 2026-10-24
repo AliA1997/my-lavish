@@ -127,7 +127,6 @@ async function api(baseUrl, method, urlPath, opts) {
   try {
     res = await request(baseUrl, method, urlPath, opts);
   } catch (e) {
-    if (e instanceof Interrupted) throw e;
     throw new CliError("SERVER_UNAVAILABLE", `Could not reach the server at ${baseUrl}: ${e.message}`, "Re-run the command; it starts the server if needed. Check server.log in the state dir if it keeps failing.");
   }
   return res;
@@ -357,6 +356,11 @@ async function cmdStop(io) {
   }
   const res = await api(baseUrl, "POST", "/shutdown", { body: {}, timeoutMs: 10000 });
   if (res.status !== 200) throw httpError(res, "");
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (!(await probeHealth(baseUrl)).up) break;
+  }
   return { ok: true, stopped: true, next_step: "Server stopped. Any command that needs it starts it again." };
 }
 

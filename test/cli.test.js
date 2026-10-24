@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -75,7 +76,6 @@ test("open, poll and stop against a spawned server", async (t) => {
   };
   t.after(async () => {
     await run(["stop"], fakeIo(env).io).catch(() => {});
-    await new Promise((r) => setTimeout(r, 200));
     await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
   });
   const file = path.join(dir, "page.html");
@@ -91,4 +91,52 @@ test("open, poll and stop against a spawned server", async (t) => {
 
   const s = fakeIo(env);
   assert.equal(await run(["stop"], s.io), 0);
+});
+
+async function fakeServer(t, handler) {
+  const server = http.createServer(handler);
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  t.after(() => new Promise((r) => { server.close(() => r()); server.closeAllConnections?.(); }));
+  return server.address().port;
+}
+
+async function tmpHtml(t) {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-cli-"));
+  t.after(() => fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {}));
+  const file = path.join(dir, "page.html");
+  await fs.promises.writeFile(file, "<html><body>hi</body></html>");
+  return { dir, file };
+}
+
+test("poll reports LISTENER_ACTIVE on 409", async (t) => {
+  const { dir, file } = await tmpHtml(t);
+  const port = await fakeServer(t, (req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi" }));
+    req.resume();
+    res.statusCode = 409;
+    res.end(JSON.stringify({ error: { code: "LISTENER_ACTIVE", message: "busy" } }));
+  });
+  const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
+  assert.equal(await run(["poll", file, "--agent-reply", "x", "--json"], a.io), 1);
+  const out = JSON.parse(a.stdout());
+  assert.equal(out.error.code, "LISTENER_ACTIVE");
+  assert.match(out.next_step, /another poll is already listening/i);
+  assert.match(out.next_step, /re-send your reply/i);
+});
+
+test("open reports PORT_IN_USE when another app owns the port", async (t) => {
+  const { dir, file } = await tmpHtml(t);
+  const port = await fakeServer(t, (req, res) => res.end("not json"));
+  const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
+  assert.equal(await run(["open", file, "--json"], a.io), 1);
+  assert.equal(JSON.parse(a.stdout()).error.code, "PORT_IN_USE");
+  assert.equal(fs.existsSync(path.join(dir, "server.log")), false, "no server spawned");
+});
+
+test("poll rejects both reply flags", async (t) => {
+  const { file } = await tmpHtml(t);
+  const a = fakeIo();
+  assert.equal(await run(["poll", file, "--agent-reply", "x", "--agent-reply-file", "y", "--json"], a.io), 1);
+  assert.equal(JSON.parse(a.stdout()).error.code, "VALIDATION_ERROR");
 });

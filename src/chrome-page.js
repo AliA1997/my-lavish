@@ -44,9 +44,10 @@ export function createChromeHtml(session, { baseUrl } = {}) {
     <div id="composer">
       <button id="annotateToggle" type="button">Annotate</button>
       <textarea id="chatInput" rows="3" placeholder="Message the agent"></textarea>
-      <button id="send" type="button">Send</button>
-      <button id="sendAndEnd" type="button">Send and end</button>
+      <button id="send" type="button">Send to Agent</button>
+      <button id="sendAndEnd" type="button">Send &amp; End</button>
       <button id="endSession" type="button">End session</button>
+      <p id="sendHint" role="status" aria-live="polite"></p>
     </div>
   </aside>
 </div>

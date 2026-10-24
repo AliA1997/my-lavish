@@ -97,6 +97,9 @@ test("chrome page is framed safely", async (t) => {
   assert.ok(body.includes('sandbox="allow-scripts allow-forms allow-popups"'));
   assert.ok(!body.includes("allow-same-origin"));
   assert.ok(body.includes("<title>My Plan</title>"));
+  assert.ok(body.includes("Send to Agent"));
+  assert.ok(body.includes("Send &amp; End"));
+  assert.ok(body.includes('id="sendHint"'));
   assert.ok(body.includes(`/artifact/${key}/index.html?rev=0`));
   assert.equal((await fetch(`${baseUrl}/session/0000000000000000`)).status, 404);
 });

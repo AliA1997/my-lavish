@@ -23,7 +23,7 @@
   var endButton = document.getElementById("endSession");
   var annotateButton = document.getElementById("annotateToggle");
   var presenceBanner = document.getElementById("presenceBanner");
-  var sendHint = ensureSendHint();
+  var sendHint = document.getElementById("sendHint");
 
   var queue = loadQueue();
   var ended = false;
@@ -45,18 +45,6 @@
     } catch (e) {
       return {};
     }
-  }
-
-  function ensureSendHint() {
-    var hint = document.getElementById("sendHint");
-    if (hint) return hint;
-    hint = document.createElement("div");
-    hint.id = "sendHint";
-    hint.setAttribute("role", "status");
-    hint.setAttribute("aria-live", "polite");
-    var composer = document.getElementById("composer");
-    (composer || document.body).appendChild(hint);
-    return hint;
   }
 
   function isQueuedPrompt(p) {
@@ -181,6 +169,7 @@
     presenceBanner.hidden = true;
     showHint("Session ended", false);
     setFrameMode(false);
+    postToFrame({ type: "ended" });
     renderControls();
     renderQueue();
   }
@@ -217,7 +206,11 @@
   }
 
   function enqueue(raw) {
-    if (ended || !raw || typeof raw !== "object" || typeof raw.prompt !== "string" || !raw.prompt.trim()) return;
+    if (ended) {
+      showHint("Session ended — new notes are not sent.", true);
+      return;
+    }
+    if (!raw || typeof raw !== "object" || typeof raw.prompt !== "string" || !raw.prompt.trim()) return;
     var item = {
       prompt_id: newPromptId(), // always assigned here, never trusted from the frame
       prompt: raw.prompt.trim(),
@@ -240,7 +233,10 @@
 
   function onFrameReady() {
     frameLoads++;
-    if (ended) postToFrame({ type: "setMode", annotate: false });
+    if (ended) {
+      postToFrame({ type: "setMode", annotate: false });
+      postToFrame({ type: "ended" });
+    }
     else if (frameLoads > 1) postToFrame({ type: "setMode", annotate: annotate }); // keep mode across reloads
     if (pendingRestore) {
       postToFrame({ type: "restoreScroll", x: pendingRestore.x, y: pendingRestore.y });

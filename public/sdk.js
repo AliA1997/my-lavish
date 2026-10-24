@@ -2,7 +2,11 @@
  * Classic script (no imports). Everything lives in one IIFE so the only global
  * it adds to the artifact is the public `window.lavish` API.
  * The artifact runs in a sandboxed iframe with an opaque origin, so this file
- * must not touch storage APIs and posts to the parent with targetOrigin "*". */
+ * must not touch storage APIs and posts to the parent with targetOrigin "*".
+ * Messages carry source "my-lavish". Chrome -> SDK: setMode {annotate},
+ * requestSnapshot {id}, restoreScroll {x,y}, ended {} (session over: stop
+ * annotating and hide the note UI). SDK -> chrome: ready, mode, scroll,
+ * snapshot, queuePrompt. */
 (function () {
   "use strict";
 
@@ -21,11 +25,12 @@
 
   var framed = window.parent !== window;
   var annotate = document.documentElement.getAttribute("data-lavish-annotate") !== "off";
-  var hovered = null; // { el, style } while an element carries the hover outline
+  var hovered = null; // { el, outline } while an element carries the hover outline
   var card = null; // the open note card element
   var commentButton = null;
   var pendingSelection = null; // { text, selector } captured when Comment is shown
   var scrollTimer = null;
+  var ended = false; // the chrome reported the session over: no more notes
 
   // ---- messaging -----------------------------------------------------------
 
@@ -46,7 +51,12 @@
     if (data.type === "requestSnapshot") {
       post({ type: "snapshot", id: data.id, html: snapshot() });
     } else if (data.type === "setMode") {
-      setAnnotate(Boolean(data.annotate));
+      setAnnotate(Boolean(data.annotate) && !ended);
+    } else if (data.type === "ended") {
+      ended = true;
+      closeCard();
+      hideComment();
+      setAnnotate(false);
     } else if (data.type === "restoreScroll") {
       var x = Number(data.x);
       var y = Number(data.y);
@@ -252,6 +262,7 @@
 
   function showComment() {
     hideComment();
+    if (ended) return;
     var sel = window.getSelection && window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
     var text = sel.toString().trim();
@@ -263,6 +274,7 @@
     var active = document.activeElement;
     if (active && active.matches && active.matches("input, textarea, [contenteditable], [contenteditable] *")) return;
 
+    closeCard(); // a double-click leaves the first element card open
     pendingSelection = { text: text, selector: cssSelector(ancestor) };
     var rect = range.getBoundingClientRect();
     ensureStyle();
@@ -288,15 +300,20 @@
 
   function clearHover() {
     if (!hovered) return;
-    if (hovered.style === null) hovered.el.removeAttribute("style");
-    else hovered.el.setAttribute("style", hovered.style);
+    restoreOutline(hovered.el, hovered.outline);
     hovered = null;
+  }
+
+  /** Restores only the outline property, leaving other inline style changes alone. */
+  function restoreOutline(el, outline) {
+    el.style.outline = outline;
+    if (el.getAttribute("style") === "") el.removeAttribute("style");
   }
 
   function setHover(el) {
     if (hovered && hovered.el === el) return;
     clearHover();
-    hovered = { el: el, style: el.getAttribute("style") };
+    hovered = { el: el, outline: el.style.outline };
     el.style.outline = HOVER_OUTLINE;
   }
 
@@ -375,10 +392,7 @@
       var copy = root;
       var path = childPath(hovered.el);
       for (var i = 0; copy && i < path.length; i++) copy = copy.children[path[i]];
-      if (copy) {
-        if (hovered.style === null) copy.removeAttribute("style");
-        else copy.setAttribute("style", hovered.style);
-      }
+      if (copy) restoreOutline(copy, hovered.outline);
     }
     var injected = root.querySelectorAll("[" + UI_ATTR + "], script[src]");
     for (var j = 0; j < injected.length; j++) {

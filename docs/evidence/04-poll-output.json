@@ -1,0 +1,28 @@
+{
+  "session": {
+    "file": "examples/plan.html",
+    "status": "feedback"
+  },
+  "prompts": [
+    {
+      "prompt_id": "e60ee647-8fe0-4f2a-964f-b788dff215cb",
+      "prompt": "bigger",
+      "tag": "h1",
+      "selector": "body > h1:nth-of-type(1)",
+      "text": "Plan"
+    },
+    {
+      "prompt_id": "dfd21160-f5fd-4ba5-a893-02a218104e21",
+      "prompt": "shorter wording",
+      "tag": "text",
+      "selector": "body > p:nth-of-type(1)",
+      "text": "This page shows a sm",
+      "target": {
+        "type": "text-range",
+        "text": "This page shows a sm",
+        "selector": "body > p:nth-of-type(1)"
+      }
+    }
+  ],
+  "next_step": "Apply each prompt to the HTML file in place (`selector` says where), then poll again with `my-lavish-axi poll examples/plan.html --agent-reply \"<short summary>\"`."
+}

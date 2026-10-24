@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { canonicalFile, assertHtmlFile, resolveArtifactAsset } from "../src/artifact-path.js";
 
-async function makeTree() {
+async function makeTree(t) {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-path-"));
+  t.after(() => fs.promises.rm(dir, { recursive: true, force: true }));
   const site = path.join(dir, "site");
   await fs.promises.mkdir(path.join(site, "img"), { recursive: true });
   await fs.promises.writeFile(path.join(site, "a.html"), "<html></html>");
@@ -16,8 +17,8 @@ async function makeTree() {
   return { dir, site };
 }
 
-test("canonicalFile maps different spellings to one path", async () => {
-  const { dir } = await makeTree();
+test("canonicalFile maps different spellings to one path", async (t) => {
+  const { dir } = await makeTree(t);
   const plain = await canonicalFile(path.join(dir, "site", "a.html"));
   assert.equal(await canonicalFile(path.join(dir, "site", "..", "site", "a.html")), plain);
   if (process.platform === "win32") {
@@ -25,8 +26,8 @@ test("canonicalFile maps different spellings to one path", async () => {
   }
 });
 
-test("assertHtmlFile validates html files", async () => {
-  const { dir, site } = await makeTree();
+test("assertHtmlFile validates html files", async (t) => {
+  const { dir, site } = await makeTree(t);
   await assert.rejects(assertHtmlFile(path.join(dir, "secret.txt")), { code: "VALIDATION_ERROR" });
   await assert.rejects(assertHtmlFile(path.join(dir, "missing.html")), {
     code: "VALIDATION_ERROR",
@@ -36,8 +37,8 @@ test("assertHtmlFile validates html files", async () => {
   await assertHtmlFile(path.join(site, "A.HTM"));
 });
 
-test("resolveArtifactAsset confines to root", async () => {
-  const { dir, site } = await makeTree();
+test("resolveArtifactAsset confines to root", async (t) => {
+  const { dir, site } = await makeTree(t);
   const ok = await resolveArtifactAsset(site, "img/x.png");
   assert.equal(ok, await fs.promises.realpath(path.join(site, "img", "x.png")));
   assert.equal(await resolveArtifactAsset(site, "../secret.txt"), null);
@@ -46,7 +47,7 @@ test("resolveArtifactAsset confines to root", async () => {
 });
 
 test("resolveArtifactAsset rejects symlink escaping root", async (t) => {
-  const { dir, site } = await makeTree();
+  const { dir, site } = await makeTree(t);
   try {
     await fs.promises.symlink(path.join(dir, "secret.txt"), path.join(site, "link.txt"));
   } catch (e) {
@@ -54,4 +55,16 @@ test("resolveArtifactAsset rejects symlink escaping root", async (t) => {
     throw e;
   }
   assert.equal(await resolveArtifactAsset(site, "link.txt"), null);
+});
+
+test("resolveArtifactAsset rejects directory junction escaping root", async (t) => {
+  const { dir, site } = await makeTree(t);
+  const outsideDir = path.join(dir, "outside");
+  await fs.promises.mkdir(outsideDir);
+  await fs.promises.writeFile(path.join(outsideDir, "data.txt"), "outside");
+  // "junction" needs no privilege on Windows; elsewhere the type arg is ignored and a dir symlink is made.
+  await fs.promises.symlink(outsideDir, path.join(site, "linkdir"), "junction");
+  // The escaped target must really exist, so a null result comes from the containment check.
+  await fs.promises.realpath(path.join(site, "linkdir", "data.txt"));
+  assert.equal(await resolveArtifactAsset(site, "linkdir/data.txt"), null);
 });

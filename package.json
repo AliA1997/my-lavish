@@ -1,0 +1,21 @@
+{
+  "name": "my-lavish-axi",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "my-lavish-axi": "bin/my-lavish-axi.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "smoke": "node scripts/smoke.js"
+  },
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "express": "^5.3.0",
+    "open": "^10.2.0",
+    "ws": "^8.22.0"
+  }
+}

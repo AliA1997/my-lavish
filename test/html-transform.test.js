@@ -21,6 +21,14 @@ test("uses last </body>, case-insensitive", () => {
   assert.ok(out.startsWith("<BODY>a</BODY><!-- </body> -->"));
 });
 
+test("locates </body> on original string when lowercasing changes length", () => {
+  const html = "<p>İ İİ</p><body>İ</body><!-- İ --></BODY>";
+  const out = injectSdk(html, "k", 1);
+  const tag = '<script src="/sdk.js?key=k&rev=1"></script>';
+  const idx = html.lastIndexOf("</BODY>");
+  assert.equal(out, html.slice(0, idx) + tag + html.slice(idx));
+});
+
 test("encodes key", () => {
   assert.ok(injectSdk("x", "a b&c", 1).includes("key=a%20b%26c&rev=1"));
 });

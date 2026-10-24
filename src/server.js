@@ -52,12 +52,13 @@ function isCrossSite(req) {
   return source !== undefined && originOf(source) !== `http://${req.headers.host}`;
 }
 
+const MAX_TIMER_MS = 2147483647;
 const isText = (v) => typeof v === "string" && v.trim() !== "";
 
 function parseTimeout(value) {
   if (value === undefined || value === null || value === "") return 0;
   const n = Number(value);
-  return Number.isFinite(n) && n >= 0 ? n : null;
+  return Number.isFinite(n) && n >= 0 ? Math.min(n, MAX_TIMER_MS) : null;
 }
 
 export function createServer({
@@ -260,7 +261,9 @@ export function createServer({
       const { key } = req.params;
       // Cross-site sources were refused by the origin guard: any source left is the page itself.
       const fromBrowser = (req.headers.origin ?? req.headers.referer) !== undefined;
-      const endedBy = fromBrowser ? "user" : "agent";
+      let endedBy = fromBrowser ? "user" : "agent";
+      const current = await store.getSession(key);
+      if (current?.status === "ended") return res.json({ ok: true, ended_by: current.ended_by });
       try {
         await store.endSession(key, endedBy);
       } catch (e) {
@@ -334,7 +337,9 @@ export function createServer({
     } catch {
       return res.status(404).json({ status: "missing" });
     }
-    if (!(await store.getSession(key))) return res.status(404).json({ status: "missing" });
+    const existing = await store.getSession(key);
+    if (!existing) return res.status(404).json({ status: "missing" });
+    watchSession(existing);
     if (vanished) return;
     if (activePolls.has(key)) {
       return res.status(409).json(errorBody("LISTENER_ACTIVE", "Another poll is already listening for this session"));
@@ -507,6 +512,7 @@ export function createServer({
 
   function onConnection(ws, session) {
     const { key } = session;
+    watchSession(session);
     if (!sockets.has(key)) sockets.set(key, new Set());
     sockets.get(key).add(ws);
     updateIdle();

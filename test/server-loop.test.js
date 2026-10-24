@@ -330,3 +330,49 @@ test("idle server closes itself; a connected websocket keeps it alive", async (t
   ]);
   assert.ok(Date.now() - started >= 900, "countdown restarts when the last client leaves");
 });
+
+test("second end keeps the first ended_by", async (t) => {
+  const { baseUrl, key, postJson, poll } = await setup(t);
+  assert.equal((await postJson(`/api/${key}/end`, {}, { Origin: baseUrl })).status, 200);
+  const again = await postJson(`/api/${key}/end`, {});
+  assert.equal(again.status, 200);
+  assert.deepEqual(await again.json(), { ok: true, ended_by: "user" });
+  assert.deepEqual(await (await poll(200)).json(), { status: "ended", ended_by: "user" });
+});
+
+test("oversized timeoutMs is clamped, not collapsed to 1 ms", async (t) => {
+  const { poll } = await setup(t);
+  const ac = new AbortController();
+  let settled = false;
+  const p = poll(3000000000, { signal: ac.signal }).then(() => (settled = true), () => {});
+  await delay(400);
+  assert.equal(settled, false, "poll still waiting");
+  ac.abort();
+  await p;
+});
+
+test("restarted server re-watches existing sessions on websocket connect", async (t) => {
+  const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-restart-"));
+  const stateDir = path.join(tmp, "state");
+  const file = path.join(tmp, "a.html");
+  await fs.promises.writeFile(file, "<html><body>hi</body></html>");
+  t.after(() => fs.promises.rm(tmp, { recursive: true, force: true }));
+  const mk = () => createServer({ store: new SessionStore(stateDir), stateDir, port: 0, version: "0.1.0" });
+  const first = mk();
+  const a = await first.listen();
+  const { key } = await (await fetch(a.baseUrl + "/api/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file }),
+  })).json();
+  await first.close();
+  const second = mk();
+  const b = await second.listen();
+  t.after(() => second.close());
+  const { ws, waitFor } = await connectWs(b.port, key);
+  t.after(() => ws.terminate());
+  await waitFor((m) => m.type === "chat");
+  await delay(300);
+  await fs.promises.writeFile(file, "<html><body>changed</body></html>");
+  await waitFor((m) => m.type === "reload", 3000);
+});

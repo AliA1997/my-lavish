@@ -24,6 +24,7 @@
   var annotateButton = document.getElementById("annotateToggle");
   var presenceBanner = document.getElementById("presenceBanner");
   var sendHint = document.getElementById("sendHint");
+  var endedBanner = document.getElementById("endedBanner");
 
   var queue = loadQueue();
   var ended = false;
@@ -34,6 +35,10 @@
   var pendingRestore = null;
   var snapshotWaiters = {};
   var reconnectAttempt = 0;
+  var shownRevision = (function () {
+    var m = /[?&]rev=(\d+)/.exec(frame ? frame.getAttribute("src") || "" : "");
+    return m ? Number(m[1]) : 0;
+  })();
 
   // ---- bootstrap & storage -------------------------------------------------
 
@@ -167,7 +172,8 @@
     ended = true;
     document.body.classList.add("ended");
     presenceBanner.hidden = true;
-    showHint("Session ended", false);
+    showHint("", false);
+    endedBanner.hidden = false;
     setFrameMode(false);
     postToFrame({ type: "ended" });
     renderControls();
@@ -381,7 +387,9 @@
       pruneQueue(msg.chat);
     } else if (msg.type === "presence") {
       setPresence(msg.listening);
-    } else if (msg.type === "reload") {
+    } else if (msg.type === "reload" || (msg.type === "revision" && Number(msg.revision) !== shownRevision)) {
+      // "revision" is sent on every (re)connect: it catches reloads missed while the socket was down.
+      shownRevision = Number(msg.revision);
       pendingRestore = lastScroll;
       frame.src = "/artifact/" + encodeURIComponent(key) + "/index.html?rev=" + encodeURIComponent(String(msg.revision));
     } else if (msg.type === "ended") {

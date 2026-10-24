@@ -39,6 +39,7 @@ export function createChromeHtml(session, { baseUrl } = {}) {
   </main>
   <aside id="panel">
     <div id="presenceBanner" hidden></div>
+    <div id="endedBanner" role="status" hidden>Session ended</div>
     <div id="chatLog"></div>
     <div id="queuedLog"></div>
     <div id="composer">

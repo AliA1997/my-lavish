@@ -354,3 +354,15 @@ body.ended #sendHint {
     max-height: 50vh;
   }
 }
+
+#endedBanner {
+  padding: 8px 12px;
+  background: var(--error, #b3261e);
+  color: #fff;
+  font-weight: 600;
+  text-align: center;
+}
+
+#endedBanner[hidden] {
+  display: none;
+}

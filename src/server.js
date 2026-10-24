@@ -529,6 +529,8 @@ export function createServer({
     });
     ws.send(JSON.stringify({ type: "presence", listening: Boolean(activePolls.get(key)?.listening) }));
     ws.send(JSON.stringify({ type: "chat", chat: serializeChat(session.chat) }));
+    // Lets a (re)connecting client notice a reload it missed while disconnected.
+    ws.send(JSON.stringify({ type: "revision", revision: session.revision }));
   }
 
   function pingAll() {

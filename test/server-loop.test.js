@@ -300,6 +300,43 @@ test("websocket gets presence, chat, and reload on file change", async (t) => {
   assert.equal(reload.revision, 1);
 });
 
+test("reload fires again after the file is replaced by rename, unlink+create, or quick edits", async (t) => {
+  const { port, key, file, art } = await setup(t);
+  const { ws, messages, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  await waitFor((m) => m.type === "chat");
+  assert.equal((await waitFor((m) => m.type === "revision")).revision, 0);
+  const count = () => messages.filter((m) => m.type === "reload").length;
+  const expectReload = async (label, action) => {
+    const before = count();
+    await action();
+    await waitFor((m) => m.type === "reload", 3000, messages.length > before ? 0 : messages.length)
+      .catch(() => {});
+    const deadline = Date.now() + 3000;
+    while (count() <= before && Date.now() < deadline) await delay(50);
+    assert.ok(count() > before, `no reload after: ${label}`);
+    await delay(400);
+  };
+  await expectReload("plain write", () => fs.promises.writeFile(file, "<h1>one</h1>"));
+  await expectReload("second plain write", () => fs.promises.writeFile(file, "<h1>two</h1>"));
+  await expectReload("replace by rename", async () => {
+    const tmpf = path.join(art, "a.html.tmp");
+    await fs.promises.writeFile(tmpf, "<h1>three</h1>");
+    await fs.promises.rename(tmpf, file);
+  });
+  await expectReload("unlink then recreate", async () => {
+    await fs.promises.unlink(file);
+    await delay(300);
+    await fs.promises.writeFile(file, "<h1>four</h1>");
+  });
+  await expectReload("write after recreate", () => fs.promises.writeFile(file, "<h1>five</h1>"));
+  await expectReload("quick successive edits", async () => {
+    await fs.promises.writeFile(file, "<h1>six</h1>");
+    await delay(30);
+    await fs.promises.writeFile(file, "<h1>seven</h1>");
+  });
+});
+
 test("websocket upgrade is guarded", async (t) => {
   const { port, key } = await setup(t);
   assert.equal(await wsAttempt(port, `/events/${key}`, { Host: "evil.example" }), 403);

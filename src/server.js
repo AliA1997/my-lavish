@@ -2,12 +2,18 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import chokidar from "chokidar";
+import { WebSocketServer } from "ws";
 import { assertHtmlFile, canonicalFile, resolveArtifactAsset } from "./artifact-path.js";
 import { injectSdk } from "./html-transform.js";
 import { createChromeHtml } from "./chrome-page.js";
+import { serializeChat } from "./markdown.js";
+import { sessionKey, StoreError } from "./session-store.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+const PING_INTERVAL_MS = 30000;
+const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409 };
 
 function hostnameOf(hostHeader) {
   if (!hostHeader) return "";
@@ -33,23 +39,115 @@ function errorBody(code, message) {
   return { error: { code, ...(message ? { message } : {}) } };
 }
 
+function sendStoreError(res, e) {
+  if (!(e instanceof StoreError)) throw e;
+  res.status(STORE_ERROR_STATUS[e.code] ?? 400).json(errorBody(e.code, e.message));
+}
+
+/** True for browser requests made from another site (header-less CLI requests are not). */
+function isCrossSite(req) {
+  const site = req.headers["sec-fetch-site"];
+  if (site !== undefined && site !== "same-origin" && site !== "none") return true;
+  const source = req.headers.origin ?? req.headers.referer;
+  return source !== undefined && originOf(source) !== `http://${req.headers.host}`;
+}
+
+const isText = (v) => typeof v === "string" && v.trim() !== "";
+
+function parseTimeout(value) {
+  if (value === undefined || value === null || value === "") return 0;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 export function createServer({
   store,
   stateDir,
   port = 4388,
   host = "127.0.0.1",
-  idleTimeoutMs = 1800000, // eslint-disable-line no-unused-vars -- used by idle exit (Task 6)
+  idleTimeoutMs = 1800000,
+  exitOnIdle = false,
   version,
   log = () => {},
 }) {
   const app = express();
   const events = new EventEmitter();
+  const wss = new WebSocketServer({ noServer: true });
+  const sockets = new Map(); // key -> Set<WebSocket>
+  const watchers = new Map(); // key -> chokidar watcher
+  const activePolls = new Map(); // key -> poll state
+  const background = new Set(); // promises close() must wait for
   let httpServer = null;
   let baseUrl = null;
   let closing = null;
+  let pingTimer = null;
+  let idleTimer = null;
 
-  // Task 6 fills this with a chokidar watcher that bumps the revision.
-  function watchSession(session) { // eslint-disable-line no-unused-vars
+  function track(promise) {
+    background.add(promise);
+    promise.finally(() => background.delete(promise)).catch(() => {});
+    return promise;
+  }
+
+  function broadcast(key, message) {
+    const set = sockets.get(key);
+    if (!set) return;
+    const data = JSON.stringify(message);
+    for (const ws of set) if (ws.readyState === ws.OPEN) ws.send(data);
+  }
+
+  async function broadcastChat(key) {
+    const session = await store.getSession(key);
+    if (session) broadcast(key, { type: "chat", chat: serializeChat(session.chat) });
+    return session;
+  }
+
+  // Idle exit: counts down only while nothing (no WebSocket, no poll) is connected.
+  function updateIdle() {
+    if (closing || !httpServer || !(idleTimeoutMs > 0)) return;
+    let connected = activePolls.size;
+    for (const set of sockets.values()) connected += set.size;
+    if (connected > 0) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    } else if (!idleTimer) {
+      idleTimer = setTimeout(() => {
+        log(`idle for ${idleTimeoutMs} ms, shutting down`);
+        close().then(() => {
+          if (exitOnIdle) process.exit(0);
+        });
+      }, idleTimeoutMs);
+      idleTimer.unref();
+    }
+  }
+
+  // One watcher per session; resolves once the watcher is ready.
+  function watchSession(session) {
+    if (closing || watchers.has(session.key)) return Promise.resolve();
+    const { key } = session;
+    const watcher = chokidar.watch(session.file, {
+      ignoreInitial: true,
+      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
+    });
+    watchers.set(key, watcher);
+    const onChange = () => {
+      if (closing) return;
+      track(
+        store.bumpRevision(key).then(
+          (revision) => broadcast(key, { type: "reload", revision }),
+          (e) => log(`revision bump failed for ${key}: ${e?.message ?? e}`),
+        ),
+      );
+    };
+    watcher.on("change", onChange);
+    watcher.on("add", onChange);
+    return new Promise((resolve) => {
+      watcher.once("ready", resolve);
+      watcher.on("error", (e) => {
+        log(`watcher error for ${key}: ${e?.message ?? e}`);
+        resolve();
+      });
+    });
   }
 
   app.disable("x-powered-by");
@@ -100,12 +198,222 @@ export function createServer({
         throw e;
       }
       const { status, session } = await store.upsertSession(real, baseUrl, { reopen: Boolean(reopen) });
-      watchSession(session);
+      await watchSession(session);
       res.json({ status, key: session.key, url: session.url });
     } catch (e) {
       next(e);
     }
   });
+
+  app.post("/api/:key/prompts", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Prompts must come from the session page"));
+      }
+      const { key } = req.params;
+      const { prompts, dom_snapshot, end } = req.body ?? {};
+      const valid = Array.isArray(prompts)
+        && prompts.every((p) => p && isText(p.prompt_id) && typeof p.prompt === "string");
+      if (!valid) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "prompts must be an array of { prompt_id, prompt }"));
+      }
+      let accepted;
+      try {
+        ({ accepted } = await store.queuePrompts(key, {
+          prompts,
+          dom_snapshot: typeof dom_snapshot === "string" ? dom_snapshot : "",
+          end: Boolean(end),
+        }));
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      if (accepted > 0) events.emit("feedback", key);
+      const session = await broadcastChat(key);
+      if (end) {
+        events.emit("ended", key);
+        broadcast(key, { type: "ended", ended_by: "user" });
+      }
+      res.json({ accepted, chat: serializeChat(session?.chat ?? []) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/agent-reply", async (req, res, next) => {
+    try {
+      const { text } = req.body ?? {};
+      if (!isText(text)) return res.status(400).json(errorBody("VALIDATION_ERROR", "text is required"));
+      try {
+        await store.appendAgentReply(req.params.key, text);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      await broadcastChat(req.params.key);
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/end", async (req, res, next) => {
+    try {
+      const { key } = req.params;
+      // Cross-site sources were refused by the origin guard: any source left is the page itself.
+      const fromBrowser = (req.headers.origin ?? req.headers.referer) !== undefined;
+      const endedBy = fromBrowser ? "user" : "agent";
+      try {
+        await store.endSession(key, endedBy);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      events.emit("ended", key);
+      broadcast(key, { type: "ended", ended_by: endedBy });
+      res.json({ ok: true, ended_by: endedBy });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // GET skips the origin guard, yet a poll consumes feedback: refuse browser cross-site loads.
+  // The query never carries agent_reply (writes go through POST).
+  app.get("/api/poll", (req, res, next) => {
+    if (isCrossSite(req)) {
+      return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+    }
+    const { file, timeoutMs } = req.query ?? {};
+    track(handlePoll(req, res, { file, timeoutMs }).catch(next));
+  });
+
+  app.post("/api/poll", (req, res, next) => {
+    track(handlePoll(req, res, req.body ?? {}).catch(next));
+  });
+
+  async function handlePoll(req, res, { file, agent_reply: agentReply, timeoutMs: rawTimeout }) {
+    // Registered before any await so a client that vanishes early is never missed.
+    let vanished = false;
+    let poll = null;
+    let unconfirmed = null; // feedback taken from the store but not yet fully written
+    res.on("finish", () => {
+      unconfirmed = null;
+    });
+    res.on("close", () => {
+      if (res.writableFinished) return;
+      vanished = true;
+      restoreUnconfirmed();
+      poll?.release();
+    });
+
+    function restoreUnconfirmed() {
+      const taken = unconfirmed;
+      unconfirmed = null;
+      if (!taken) return;
+      const { prompts, dom_snapshot } = taken;
+      track(
+        store.queuePrompts(poll.key, { prompts, dom_snapshot }, { restore: true }).then(
+          ({ accepted }) => {
+            if (accepted > 0) events.emit("feedback", poll.key);
+          },
+          (e) => log(`restore failed for ${poll.key}: ${e?.message ?? e}`),
+        ),
+      );
+    }
+
+    if (typeof file !== "string" || !file) {
+      return res.status(400).json(errorBody("VALIDATION_ERROR", "file is required"));
+    }
+    const timeoutMs = parseTimeout(rawTimeout);
+    if (timeoutMs === null) {
+      return res.status(400).json(errorBody("VALIDATION_ERROR", "timeoutMs must be a non-negative number"));
+    }
+    if (agentReply !== undefined && !isText(agentReply)) {
+      return res.status(400).json(errorBody("VALIDATION_ERROR", "agent_reply must be non-empty text"));
+    }
+    let key;
+    try {
+      key = sessionKey(await canonicalFile(file));
+    } catch {
+      return res.status(404).json({ status: "missing" });
+    }
+    if (!(await store.getSession(key))) return res.status(404).json({ status: "missing" });
+    if (vanished) return;
+    if (activePolls.has(key)) {
+      return res.status(409).json(errorBody("LISTENER_ACTIVE", "Another poll is already listening for this session"));
+    }
+
+    // Acquire the listener slot (synchronously after the check).
+    let pending = false;
+    let wake = null;
+    let timer = null;
+    const notify = () => {
+      pending = true;
+      wake?.();
+    };
+    const onEvent = (k) => {
+      if (k === key) notify();
+    };
+    poll = {
+      key,
+      listening: false,
+      notify,
+      released: false,
+      release() {
+        if (poll.released) return;
+        poll.released = true;
+        events.off("feedback", onEvent);
+        events.off("ended", onEvent);
+        clearTimeout(timer);
+        if (activePolls.get(key) === poll) activePolls.delete(key);
+        if (poll.listening) {
+          poll.listening = false;
+          broadcast(key, { type: "presence", listening: false });
+        }
+        notify();
+        updateIdle();
+      },
+    };
+    activePolls.set(key, poll);
+    events.on("feedback", onEvent);
+    events.on("ended", onEvent);
+    updateIdle();
+
+    try {
+      if (agentReply !== undefined) {
+        await store.appendAgentReply(key, agentReply);
+        await broadcastChat(key);
+      }
+
+      let result = await store.takeFeedback(key);
+      let timedOut = false;
+      while (result.status === "waiting" && !timedOut && !vanished && !closing) {
+        if (!poll.listening) {
+          poll.listening = true;
+          broadcast(key, { type: "presence", listening: true });
+          if (timeoutMs > 0) {
+            timer = setTimeout(() => {
+              timedOut = true;
+              notify();
+            }, timeoutMs);
+            timer.unref();
+          }
+        }
+        if (!pending) await new Promise((resolve) => (wake = resolve));
+        wake = null;
+        pending = false;
+        if (vanished || closing) break;
+        result = await store.takeFeedback(key);
+      }
+
+      if (result.status === "feedback") unconfirmed = result;
+      if (vanished) {
+        restoreUnconfirmed();
+        return;
+      }
+      poll.release();
+      res.json(result);
+    } finally {
+      poll.release();
+    }
+  }
 
   app.get("/session/:key", async (req, res, next) => {
     try {
@@ -146,6 +454,7 @@ export function createServer({
       const stat = real && (await fs.promises.stat(real).catch(() => null));
       if (!stat || !stat.isFile()) return res.status(404).json(errorBody("NOT_FOUND", "No such asset"));
       res.set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups");
+      res.set("Cache-Control", "no-cache");
       res.sendFile(real, { dotfiles: "allow" }, (err) => {
         if (err && !res.headersSent) next(err);
       });
@@ -170,15 +479,83 @@ export function createServer({
     res.status(status).json(errorBody(status === 400 ? "BAD_REQUEST" : "INTERNAL", err?.message));
   });
 
+  function rejectUpgrade(socket, status, reason) {
+    if (socket.writable) socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    socket.destroy();
+  }
+
+  async function onUpgrade(req, socket, head) {
+    socket.on("error", () => {});
+    const hostHeader = req.headers.host;
+    if (!ALLOWED_HOSTNAMES.has(hostnameOf(hostHeader))) return rejectUpgrade(socket, 403, "Forbidden");
+    const origin = req.headers.origin;
+    if (origin !== undefined && originOf(origin) !== `http://${hostHeader}`) {
+      return rejectUpgrade(socket, 403, "Forbidden");
+    }
+    let pathname;
+    try {
+      pathname = new URL(req.url, "http://localhost").pathname;
+    } catch {
+      return rejectUpgrade(socket, 404, "Not Found");
+    }
+    const m = pathname.match(/^\/events\/([0-9a-f]{16})$/);
+    const session = m && (await store.getSession(m[1]).catch(() => null));
+    if (!session) return rejectUpgrade(socket, 404, "Not Found");
+    if (closing) return rejectUpgrade(socket, 503, "Service Unavailable");
+    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, session));
+  }
+
+  function onConnection(ws, session) {
+    const { key } = session;
+    if (!sockets.has(key)) sockets.set(key, new Set());
+    sockets.get(key).add(ws);
+    updateIdle();
+    ws.isAlive = true;
+    ws.on("pong", () => {
+      ws.isAlive = true;
+    });
+    ws.on("error", () => {});
+    ws.on("close", () => {
+      const set = sockets.get(key);
+      set?.delete(ws);
+      if (set && set.size === 0) sockets.delete(key);
+      updateIdle();
+    });
+    ws.send(JSON.stringify({ type: "presence", listening: Boolean(activePolls.get(key)?.listening) }));
+    ws.send(JSON.stringify({ type: "chat", chat: serializeChat(session.chat) }));
+  }
+
+  function pingAll() {
+    for (const set of sockets.values()) {
+      for (const ws of set) {
+        if (!ws.isAlive) {
+          ws.terminate();
+          continue;
+        }
+        ws.isAlive = false;
+        ws.ping();
+      }
+    }
+  }
+
   function listen() {
     return new Promise((resolve, reject) => {
       httpServer = app.listen(port, host);
       httpServer.requestTimeout = 0;
       httpServer.timeout = 0;
       httpServer.once("error", reject);
+      httpServer.on("upgrade", (req, socket, head) => {
+        onUpgrade(req, socket, head).catch((e) => {
+          log(`upgrade error: ${e?.stack ?? e}`);
+          socket.destroy();
+        });
+      });
       httpServer.once("listening", () => {
         const actual = httpServer.address().port;
         baseUrl = `http://127.0.0.1:${actual}`;
+        pingTimer = setInterval(pingAll, PING_INTERVAL_MS);
+        pingTimer.unref();
+        updateIdle();
         resolve({ port: actual, baseUrl });
       });
     });
@@ -186,11 +563,23 @@ export function createServer({
 
   function close() {
     if (closing) return closing;
-    closing = new Promise((resolve) => {
-      if (!httpServer) return resolve();
-      httpServer.close(() => resolve());
-      httpServer.closeAllConnections?.();
-    }).then(() => events.emit("closed"));
+    closing = (async () => {
+      clearInterval(pingTimer);
+      clearTimeout(idleTimer);
+      for (const poll of activePolls.values()) poll.notify();
+      for (const set of sockets.values()) for (const ws of set) ws.terminate();
+      wss.close();
+      await Promise.allSettled([...watchers.values()].map((w) => w.close()));
+      watchers.clear();
+      await new Promise((resolve) => {
+        if (!httpServer) return resolve();
+        httpServer.close(() => resolve());
+        httpServer.closeAllConnections?.();
+      });
+      // Let socket "close" handlers run (they may restore taken feedback), then drain.
+      await new Promise((resolve) => setImmediate(resolve));
+      while (background.size) await Promise.allSettled([...background]);
+    })().then(() => events.emit("closed"));
     return closing;
   }
 

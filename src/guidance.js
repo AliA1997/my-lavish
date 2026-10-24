@@ -5,8 +5,8 @@ export const DESIGN_TEXT = [
   "- Put sibling assets (images, CSS, JS) next to the HTML file and reference them with relative paths.",
   "- Prefer inline SVG for diagrams so they scale and follow the theme.",
   "- For decision buttons call window.lavish.queuePrompt(text) so the choice reaches the agent.",
-  "- Mark custom clickable elements with data-lavish-action so they can be annotated.",
-  "- Mark open questions with data-lavish-question so the human can answer them in place.",
+  "- data-lavish-action marks custom (non-native) controls: clicking them runs their own handler instead of opening a note card (e.g. decision buttons that call window.lavish.queuePrompt).",
+  "- Mark open questions with data-lavish-question; it is only a marker that makes them easy to find and annotate (no special UI).",
 ].join("\n");
 
 export const PLAYBOOKS = [
@@ -17,7 +17,7 @@ export const PLAYBOOKS = [
       "Start with a one-sentence goal.",
       "List the steps in order, each with a short why.",
       "Add a risks section with likelihood and mitigation.",
-      "Put every open question in its own block marked data-lavish-question.",
+      "Put every open question in its own block marked data-lavish-question so it is easy to find and annotate.",
       "Keep each section short; the human annotates sections, not paragraphs.",
       "End with the decision you need from the human.",
     ].join("\n"),
@@ -29,7 +29,7 @@ export const PLAYBOOKS = [
       "Draw with inline SVG, not images.",
       "Use CSS custom properties for stroke and fill so dark mode works.",
       "Label every box and arrow with plain words.",
-      "Give each node an id or data-lavish-action so the human can point at it.",
+      "Give each diagram node a unique id so notes point at it; never put data-lavish-action on things the human should annotate.",
       "Add a short legend if you use more than two colors.",
       "Keep one idea per diagram; split big systems into several.",
     ].join("\n"),

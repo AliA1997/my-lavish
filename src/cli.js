@@ -27,7 +27,11 @@ class Interrupted extends Error {}
 // ---------- config (always from the env passed in) ----------
 
 function configOf(env) {
-  const port = Number(env.MY_LAVISH_PORT || 4388);
+  const rawPort = env.MY_LAVISH_PORT;
+  const port = rawPort === undefined || rawPort === "" ? 4388 : Number(rawPort);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new CliError("VALIDATION_ERROR", `MY_LAVISH_PORT must be an integer 0-65535, got "${rawPort}"`, "Fix or unset MY_LAVISH_PORT and retry.");
+  }
   const stateDir = env.MY_LAVISH_STATE_DIR || path.join(os.homedir(), ".my-lavish-axi");
   const rawIdle = env.MY_LAVISH_IDLE_TIMEOUT_MS;
   let idleTimeoutMs = 1800000;
@@ -40,15 +44,19 @@ function configOf(env) {
 
 // ---------- pure output builders ----------
 
-const POLL_CMD = (file) => `my-lavish-axi poll ${file}`;
+export function shellQuote(p) {
+  return /[\s"'`$&|;<>()*?!#~^%{}\[\]\\]/.test(p) ? JSON.stringify(p) : p;
+}
+
+const POLL_CMD = (file) => `my-lavish-axi poll ${shellQuote(file)}`;
 
 export function createOpenOutput({ file, url, status }) {
   return {
     session: { file, url, status },
     next_step:
-      `Do not respond to the user yet. Run \`my-lavish-axi poll ${file}\` now and leave it running; ` +
+      `Do not respond to the user yet. Run \`${POLL_CMD(file)}\` now and leave it running; ` +
       "it stays silent until the user sends feedback or ends the session. " +
-      `After applying feedback, run \`my-lavish-axi poll ${file} --agent-reply "<short summary>"\`.`,
+      `After applying feedback, run \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.`,
   };
 }
 
@@ -57,7 +65,7 @@ export function createUserEndedOutput({ file }) {
     session: { file, status: "user-ended" },
     next_step:
       "The user ended this session. Give any updates in chat and do not poll. " +
-      `Use \`my-lavish-axi ${file} --reopen\` only if the user asks to reopen it.`,
+      `Use \`my-lavish-axi ${shellQuote(file)} --reopen\` only if the user asks to reopen it.`,
   };
 }
 
@@ -135,13 +143,13 @@ async function api(baseUrl, method, urlPath, opts) {
 function httpError(res, file) {
   const code = res.body?.error?.code;
   if (res.status === 404 && res.body?.status === "missing") {
-    return new CliError("NOT_FOUND", `No session for ${file}`, `Run \`my-lavish-axi ${file}\` to open it first.`);
+    return new CliError("NOT_FOUND", `No session for ${file}`, `Run \`my-lavish-axi ${shellQuote(file)}\` to open it first.`);
   }
   if (code === "LISTENER_ACTIVE") {
     return new CliError(
       code,
       res.body.error.message ?? "Another poll is already listening",
-      "Another poll is already listening for this file. Wait for it or stop it, then re-send your reply with the next poll (this reply was not recorded).",
+      "Another poll is already listening for this file. If that poll is yours and still running, wait for it. If no poll of yours is running (a killed shell can leave an orphan), run `my-lavish-axi stop` (restarts the server and releases the stale listener), then re-run poll and re-send your reply with that poll (this reply was not recorded).",
     );
   }
   return new CliError(

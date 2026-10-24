@@ -110,7 +110,10 @@ test("artifact index.html is original plus sdk tag, sandboxed", async (t) => {
   const { key } = await (await post(baseUrl, { file: path.join(art, "a.html") })).json();
   const r = await fetch(`${baseUrl}/artifact/${key}/index.html`);
   assert.equal(r.status, 200);
-  assert.equal(r.headers.get("content-security-policy"), "sandbox allow-scripts allow-forms allow-popups");
+  assert.equal(r.headers.get("content-security-policy"), "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'self'");
+  const asset = await fetch(`${baseUrl}/artifact/${key}/img/x.png`);
+  assert.match(asset.headers.get("content-security-policy"), /^sandbox allow-scripts allow-forms allow-popups/);
+  assert.match(asset.headers.get("content-security-policy"), /frame-ancestors 'self'/);
   assert.equal(await r.text(), injectSdk(html, key, 0));
   assert.equal((await fetch(`${baseUrl}/artifact/ffffffffffffffff/index.html`)).status, 404);
 });

@@ -433,7 +433,7 @@ export function createServer({
       } catch {
         return res.status(404).json(errorBody("NOT_FOUND", "Artifact file missing"));
       }
-      res.set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups");
+      res.set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'self'");
       res.set("Cache-Control", "no-cache");
       res.type("html").send(injectSdk(html, session.key, session.revision));
     } catch (e) {
@@ -449,7 +449,7 @@ export function createServer({
       const real = await resolveArtifactAsset(session.dir, rel);
       const stat = real && (await fs.promises.stat(real).catch(() => null));
       if (!stat || !stat.isFile()) return res.status(404).json(errorBody("NOT_FOUND", "No such asset"));
-      res.set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups");
+      res.set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'self'");
       res.set("Cache-Control", "no-cache");
       res.sendFile(real, { dotfiles: "allow" }, (err) => {
         if (err && !res.headersSent) next(err);

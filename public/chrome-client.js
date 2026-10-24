@@ -232,6 +232,7 @@
       }
     }
     queue.push(item);
+    if (!ended) showHint("", false);
     saveQueue();
     renderQueue();
     queuedLog.scrollTop = queuedLog.scrollHeight;

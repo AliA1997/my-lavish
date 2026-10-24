@@ -123,6 +123,29 @@ test("poll reports LISTENER_ACTIVE on 409", async (t) => {
   assert.equal(out.error.code, "LISTENER_ACTIVE");
   assert.match(out.next_step, /another poll is already listening/i);
   assert.match(out.next_step, /re-send your reply/i);
+  assert.match(out.next_step, /my-lavish-axi stop/);
+});
+
+test("diagram playbook does not tell agents to annotate via data-lavish-action", async () => {
+  const a = fakeIo();
+  assert.equal(await run(["playbook", "diagram"], a.io), 0);
+  assert.doesNotMatch(a.stdout(), /data-lavish-action so the human can point/);
+  assert.match(a.stdout(), /unique id/);
+});
+
+test("next_step quotes paths with spaces, leaves plain paths alone", () => {
+  const q = createPollOutput({ file: "C:\\my dir\\a.html", response: { status: "waiting" } });
+  assert.ok(q.next_step.includes('poll "C:\\\\my dir\\\\a.html"'));
+  const p = createPollOutput({ file: "f", response: { status: "waiting" } });
+  assert.ok(p.next_step.includes("poll f`"));
+});
+
+test("invalid MY_LAVISH_PORT is a VALIDATION_ERROR", async () => {
+  const a = fakeIo({ MY_LAVISH_PORT: "abc" });
+  assert.equal(await run(["stop", "--json"], a.io), 1);
+  const out = JSON.parse(a.stdout());
+  assert.equal(out.error.code, "VALIDATION_ERROR");
+  assert.match(out.error.message, /MY_LAVISH_PORT/);
 });
 
 test("open reports PORT_IN_USE when another app owns the port", async (t) => {

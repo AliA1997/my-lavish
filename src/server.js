@@ -2,8 +2,8 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import chokidar from "chokidar";
 import { WebSocketServer } from "ws";
+import { watchArtifact } from "./artifact-watcher.js";
 import { assertHtmlFile, canonicalFile, resolveArtifactAsset } from "./artifact-path.js";
 import { injectSdk } from "./html-transform.js";
 import { createChromeHtml } from "./chrome-page.js";
@@ -75,7 +75,7 @@ export function createServer({
   const events = new EventEmitter();
   const wss = new WebSocketServer({ noServer: true });
   const sockets = new Map(); // key -> Set<WebSocket>
-  const watchers = new Map(); // key -> chokidar watcher
+  const watchers = new Map(); // key -> artifact watcher
   const activePolls = new Map(); // key -> poll state
   const background = new Set(); // promises close() must wait for
   let httpServer = null;
@@ -126,29 +126,20 @@ export function createServer({
   function watchSession(session) {
     if (closing || watchers.has(session.key)) return Promise.resolve();
     const { key } = session;
-    const watcher = chokidar.watch(session.file, {
-      ignoreInitial: true,
-      awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
+    const watcher = watchArtifact(session.file, {
+      onChange: () => {
+        if (closing) return;
+        track(
+          store.bumpRevision(key).then(
+            (revision) => broadcast(key, { type: "reload", revision }),
+            (e) => log(`revision bump failed for ${key}: ${e?.message ?? e}`),
+          ),
+        );
+      },
+      onError: (e) => log(`watcher error for ${key}: ${e?.message ?? e}`),
     });
     watchers.set(key, watcher);
-    const onChange = () => {
-      if (closing) return;
-      track(
-        store.bumpRevision(key).then(
-          (revision) => broadcast(key, { type: "reload", revision }),
-          (e) => log(`revision bump failed for ${key}: ${e?.message ?? e}`),
-        ),
-      );
-    };
-    watcher.on("change", onChange);
-    watcher.on("add", onChange);
-    return new Promise((resolve) => {
-      watcher.once("ready", resolve);
-      watcher.on("error", (e) => {
-        log(`watcher error for ${key}: ${e?.message ?? e}`);
-        resolve();
-      });
-    });
+    return watcher.ready;
   }
 
   app.disable("x-powered-by");

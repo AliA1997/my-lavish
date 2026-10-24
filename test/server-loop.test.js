@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
 import { createServer } from "../src/server.js";
@@ -335,6 +337,70 @@ test("reload fires again after the file is replaced by rename, unlink+create, or
     await delay(30);
     await fs.promises.writeFile(file, "<h1>seven</h1>");
   });
+});
+
+test("git checkout restoring a freshly watched file always reloads (stress)", async (t) => {
+  const run = promisify(execFile);
+  try {
+    await run("git", ["--version"]);
+  } catch {
+    t.skip("git is not on PATH");
+    return;
+  }
+  const { tmp, port, baseUrl } = await setup(t);
+  const repo = path.join(tmp, "repo");
+  const TRIALS = 12;
+  const original = "<!doctype html>\n<html><body>\n<h1>Plan</h1>\n<p>Body text.</p>\n</body></html>\n";
+  // One file per trial: the miss happened on the first replace a new watcher sees.
+  for (let n = 1; n <= TRIALS; n++) {
+    await fs.promises.mkdir(path.join(repo, `d${n}`), { recursive: true });
+    await fs.promises.writeFile(path.join(repo, `d${n}`, "plan.html"), original);
+  }
+  const git = (...args) => run("git", args, { cwd: repo });
+  await git("init", "-q");
+  await git("add", ".");
+  await git("-c", "user.email=t@example.com", "-c", "user.name=t", "-c", "commit.gpgsign=false",
+    "commit", "-q", "--no-verify", "-m", "init");
+
+  const misses = [];
+  for (let n = 1; n <= TRIALS; n++) {
+    const file = path.join(repo, `d${n}`, "plan.html");
+    const opened = await fetch(baseUrl + "/api/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file }),
+    });
+    const { key } = await opened.json();
+    const { ws, messages } = await connectWs(port, key);
+    const reloads = () => messages.filter((m) => m.type === "reload").length;
+    const waitReload = async (before) => {
+      const deadline = Date.now() + 3000;
+      while (reloads() <= before && Date.now() < deadline) await delay(20);
+      return reloads() > before;
+    };
+    const gap = [0, 50, 300][n % 3];
+    let before = reloads();
+    await fs.promises.writeFile(file, original.replace("<h1>Plan</h1>", `<h1>EDITED Plan ${n}</h1>`));
+    if (!(await waitReload(before))) misses.push(`trial ${n}: edit`);
+    await delay(gap);
+    before = reloads();
+    await git("checkout", "--", `d${n}/plan.html`);
+    if (!(await waitReload(before))) misses.push(`trial ${n}: checkout`);
+    ws.terminate();
+  }
+  assert.deepEqual(misses, []);
+});
+
+test("rewriting identical content does not reload", async (t) => {
+  const { port, key, file } = await setup(t);
+  const { ws, messages, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  await waitFor((m) => m.type === "revision");
+  await fs.promises.writeFile(file, "<h1>new</h1>");
+  assert.equal((await waitFor((m) => m.type === "reload")).revision, 1);
+  await fs.promises.writeFile(file, "<h1>new</h1>");
+  await delay(1200); // past chokidar's settle time and two poll ticks
+  assert.equal(messages.filter((m) => m.type === "reload").length, 1);
 });
 
 test("websocket upgrade is guarded", async (t) => {

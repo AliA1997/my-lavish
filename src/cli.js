@@ -52,10 +52,14 @@ export function shellQuote(p) {
 
 const POLL_CMD = (file) => `${CMD} poll ${shellQuote(file)}`;
 
-export function createOpenOutput({ file, url, status }) {
+export function createOpenOutput({ file, url, status, claudeSessionId }) {
+  const session = { file, url, status };
+  if (claudeSessionId) session.claude_session_id = claudeSessionId;
   return {
-    session: { file, url, status },
-    next_step:
+    session,
+    next_step: claudeSessionId
+      ? "Claude was started in a PowerShell window and will poll this session; do not poll from here."
+      :
       `Do not respond to the user yet. Run \`${POLL_CMD(file)}\` now and leave it running; ` +
       "it stays silent until the user sends feedback or ends the session. " +
       `After applying feedback, run \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.`,
@@ -228,7 +232,7 @@ export async function ensureServer(env) {
 // ---------- argument parsing ----------
 
 const VALUE_FLAGS = new Set(["--agent-reply", "--agent-reply-file", "--timeout-ms"]);
-const BOOL_FLAGS = new Set(["--json", "--no-open", "--reopen", "--help", "-h", "--version"]);
+const BOOL_FLAGS = new Set(["--json", "--no-open", "--reopen", "--with-claude", "--help", "-h", "--version"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -307,7 +311,13 @@ async function cmdOpen(file, flags, io) {
       shown = "ready";
     }
   }
-  return createOpenOutput({ file, url, status: shown });
+  let claudeSessionId;
+  if (flags["--with-claude"]) {
+    const connected = await api(baseUrl, "POST", `/api/${res.body.key}/connect-claude`, { body: {}, timeoutMs: 15000 });
+    if (connected.status !== 200) throw httpError(connected, file);
+    claudeSessionId = connected.body.claude_session_id;
+  }
+  return createOpenOutput({ file, url, status: shown, claudeSessionId });
 }
 
 async function cmdPoll(file, flags, io) {

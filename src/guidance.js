@@ -73,12 +73,12 @@ export const PLAYBOOKS = [
 ];
 
 export const HOME_USAGE = [
-  "see-plan <file.html>              open the artifact in the browser",
-  "see-plan poll <file>              wait for the human's feedback (--agent-reply, --agent-reply-file, --timeout-ms)",
-  "see-plan reply <file>             post a chat reply without polling (--agent-reply)",
-  "see-plan end <file>               end the session",
-  "see-plan design                   page design rules",
-  "see-plan playbook [id]            page recipes: plan, diagram, table, comparison, input",
-  "see-plan stop                     stop the local server",
+  "see-plan <file.html|file.md>  open the plan in the browser (--with-claude also starts Claude in PowerShell)",
+  "see-plan poll <file>          wait for the human's feedback (--agent-reply, --agent-reply-file, --timeout-ms)",
+  "see-plan reply <file>         post a chat reply without polling (--agent-reply)",
+  "see-plan end <file>           end the session",
+  "see-plan design               page design rules",
+  "see-plan playbook [id]        page recipes: plan, diagram, table, comparison, input",
+  "see-plan stop                 stop the local server",
   "flags: --json, --no-open, --reopen, --version, --help",
 ].join("\n");

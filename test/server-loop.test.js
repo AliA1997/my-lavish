@@ -501,3 +501,94 @@ test("new-session restarts an ended session", async (t) => {
   const again = await postJson(`/api/${key}/new-session`, {}, { Origin: baseUrl });
   assert.equal(again.status, 409);
 });
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function fakeLauncher() {
+  const calls = [];
+  return { calls, launchClaude: async (args) => { calls.push(args); } };
+}
+
+test("connect-claude launches and records the id", async (t) => {
+  const fake = fakeLauncher();
+  const { key, port, baseUrl, postJson, file, art } = await setup(t, { launchClaude: fake.launchClaude });
+  const { ws, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  const res = await postJson(`/api/${key}/connect-claude`, {});
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.match(body.claude_session_id, UUID);
+  assert.equal(fake.calls.length, 1);
+  assert.equal(fake.calls[0].file, file);
+  assert.equal(fake.calls[0].sessionId, body.claude_session_id);
+  assert.equal(path.resolve(fake.calls[0].cwd).startsWith(path.resolve(art).slice(0, 3)), true);
+  const msg = await waitFor((m) => m.type === "claude-session");
+  assert.equal(msg.id, body.claude_session_id);
+  const page = await (await fetch(`${baseUrl}/session/${key}`)).text();
+  assert.ok(page.includes(body.claude_session_id));
+});
+
+test("connect-claude names the md for markdown sessions", async (t) => {
+  const fake = fakeLauncher();
+  const { art, baseUrl, postJson } = await setup(t, { launchClaude: fake.launchClaude });
+  const md = path.join(art, "plan.md");
+  const html = path.join(art, "plan.html");
+  await fs.promises.writeFile(md, "# Plan");
+  await fs.promises.writeFile(html, "<html><body>plan</body></html>");
+  const opened = await postJson("/api/sessions", { file: html, source_file: md });
+  const { key } = await opened.json();
+  const res = await postJson(`/api/${key}/connect-claude`, {}, { Origin: baseUrl });
+  assert.equal(res.status, 200);
+  assert.equal(fake.calls[0].file, await fs.promises.realpath(md));
+});
+
+test("second connect within 60s is refused", async (t) => {
+  const fake = fakeLauncher();
+  const { art, key, postJson } = await setup(t, { launchClaude: fake.launchClaude });
+  const other = path.join(art, "b.html");
+  await fs.promises.writeFile(other, "<html></html>");
+  const otherKey = (await (await postJson("/api/sessions", { file: other })).json()).key;
+  const [first, same] = await Promise.all([
+    postJson(`/api/${key}/connect-claude`, {}),
+    postJson(`/api/${key}/connect-claude`, {}),
+  ]);
+  assert.deepEqual([first.status, same.status].sort(), [200, 409]);
+  const diff = await postJson(`/api/${otherKey}/connect-claude`, {});
+  assert.equal(diff.status, 409);
+  assert.equal((await diff.json()).error.code, "CONNECT_PENDING");
+  assert.equal(fake.calls.length, 1);
+});
+
+test("connect-claude refuses while a poll listens", async (t) => {
+  const fake = fakeLauncher();
+  const { key, poll, postJson, port } = await setup(t, { launchClaude: fake.launchClaude });
+  const { ws, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  const pending = poll(0).catch(() => {});
+  await waitFor((m) => m.type === "presence" && m.listening === true);
+  const res = await postJson(`/api/${key}/connect-claude`, {});
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error.code, "LISTENER_ACTIVE");
+  assert.equal(fake.calls.length, 0);
+  ws.terminate();
+  void pending;
+});
+
+test("connect-claude needs json", async (t) => {
+  const fake = fakeLauncher();
+  const { key, baseUrl } = await setup(t, { launchClaude: fake.launchClaude });
+  const res = await fetch(`${baseUrl}/api/${key}/connect-claude`, { method: "POST", headers: { "content-type": "text/plain" }, body: "x" });
+  assert.equal(res.status, 415);
+  assert.equal(fake.calls.length, 0);
+});
+
+test("connect-claude maps launcher failures", async (t) => {
+  const { key, postJson } = await setup(t, {
+    launchClaude: async () => { throw Object.assign(new Error("nope"), { code: "CLAUDE_NOT_FOUND" }); },
+  });
+  const res = await postJson(`/api/${key}/connect-claude`, {});
+  assert.equal(res.status, 424);
+  assert.equal((await res.json()).error.code, "CLAUDE_NOT_FOUND");
+  const again = await postJson(`/api/${key}/connect-claude`, {});
+  assert.equal(again.status, 424, "a failed launch does not block a retry");
+});

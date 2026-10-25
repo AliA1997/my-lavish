@@ -191,6 +191,15 @@ export class SessionStore {
     });
   }
 
+  setClaudeSession(key, id) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      s.claude_session_id = id;
+      s.updated_at = now();
+      return [s, true];
+    });
+  }
+
   startNewSession(key) {
     return this.#tx((state) => {
       const s = this.#need(state, key);

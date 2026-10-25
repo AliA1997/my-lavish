@@ -23,6 +23,8 @@
   var endButton = document.getElementById("endSession");
   var annotateButton = document.getElementById("annotateToggle");
   var presenceBanner = document.getElementById("presenceBanner");
+  var presenceText = document.getElementById("presenceText");
+  var connectButton = document.getElementById("connectClaude");
   var sendHint = document.getElementById("sendHint");
   var endedBanner = document.getElementById("endedBanner");
   var newSessionButton = document.getElementById("newSession");
@@ -164,8 +166,33 @@
   }
 
   function setPresence(listening) {
-    presenceBanner.textContent = NOT_LISTENING;
+    presenceText.textContent = NOT_LISTENING;
+    if (listening === true) connectButton.disabled = false; // a later drop may need a new launch
     presenceBanner.hidden = ended || listening !== false;
+  }
+
+  function connectClaude() {
+    connectButton.disabled = true;
+    showHint("Starting Claude in a PowerShell window…", false);
+    fetch("/api/" + encodeURIComponent(key) + "/connect-claude", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    })
+      .then(function (res) {
+        return readJson(res).then(function (body) {
+          if (res.ok) {
+            showHint("Claude is starting; this banner clears once it begins polling.", false);
+          } else {
+            connectButton.disabled = false;
+            showHint(errorMessage(body, res.status), true);
+          }
+        });
+      })
+      .catch(function (e) {
+        connectButton.disabled = false;
+        showHint("Could not reach see-plan: " + (e && e.message ? e.message : e), true);
+      });
   }
 
   function setEnded() {
@@ -472,6 +499,7 @@
   sendAndEndButton.addEventListener("click", function () { send(true); });
   endButton.addEventListener("click", endSession);
   newSessionButton.addEventListener("click", startNewSession);
+  connectButton.addEventListener("click", connectClaude);
   annotateButton.addEventListener("click", toggleAnnotate);
   document.addEventListener("keydown", function (event) {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey

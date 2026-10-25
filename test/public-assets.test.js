@@ -60,3 +60,13 @@ test("new session button is on the page and wired in the client", async (t) => {
   assert.ok(html.includes('id="newSession"'));
   assert.ok((await fetchAsset(baseUrl, "chrome-client.js")).includes("/new-session"));
 });
+
+test("presence text has its own span", async (t) => {
+  const { baseUrl } = await setup(t);
+  const html = createChromeHtml({ key: "k", file: "f.html", status: "open", chat: [], revision: 0 }, { baseUrl });
+  const banner = /<div id="presenceBanner"[^>]*>([\s\S]*?)<\/div>/.exec(html)[1];
+  assert.ok(banner.includes('id="presenceText"') && banner.includes('id="connectClaude"'));
+  const source = await fetchAsset(baseUrl, "chrome-client.js");
+  assert.ok(source.includes("presenceText.textContent"));
+  assert.ok(!source.includes("presenceBanner.textContent"));
+});

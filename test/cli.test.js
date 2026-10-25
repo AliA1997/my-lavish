@@ -223,3 +223,26 @@ test("poll next_step names the md", () => {
   assert.match(out.next_step, /Apply each prompt to `notes\.md`/);
   assert.doesNotMatch(out.next_step, /HTML file in place/);
 });
+
+test("open --with-claude prints the claude session id", async (t) => {
+  const { dir, file } = await tmpHtml(t);
+  const id = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
+  const seen = [];
+  const port = await fakeServer(t, (req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi" }));
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      if (req.url === "/api/sessions") return res.end(JSON.stringify({ status: "opened", key: "abc", url: "http://x/session/abc" }));
+      seen.push({ url: req.url, type: req.headers["content-type"], body: Buffer.concat(chunks).toString() });
+      res.end(JSON.stringify({ ok: true, claude_session_id: id }));
+    });
+  });
+  const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
+  assert.equal(await run(["open", file, "--with-claude", "--json"], a.io), 0);
+  const out = JSON.parse(a.stdout());
+  assert.equal(out.session.claude_session_id, id);
+  assert.match(out.next_step, /do not poll from here/);
+  assert.deepEqual(seen, [{ url: "/api/abc/connect-claude", type: "application/json", body: "{}" }]);
+});

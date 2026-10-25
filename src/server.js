@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -10,10 +11,13 @@ import { createChromeHtml } from "./chrome-page.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
 import { isMarkdownPath } from "./plan-markdown.js";
+import { findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const PING_INTERVAL_MS = 30000;
+const CONNECT_COOLDOWN_MS = 60000;
+const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424 };
 const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409 };
 
 function hostnameOf(hostHeader) {
@@ -71,6 +75,7 @@ export function createServer({
   exitOnIdle = false,
   version,
   log = () => {},
+  launchClaude = realLaunchClaude,
 }) {
   const app = express();
   const events = new EventEmitter();
@@ -84,6 +89,7 @@ export function createServer({
   let closing = null;
   let pingTimer = null;
   let idleTimer = null;
+  let pendingLaunch = null; // { key, at }: one launch at a time across the whole server
 
   function track(promise) {
     background.add(promise);
@@ -303,6 +309,45 @@ export function createServer({
     }
   });
 
+  app.post("/api/:key/connect-claude", async (req, res, next) => {
+    try {
+      // The origin guard already refused cross-site callers; header-less CLI calls pass but must send JSON.
+      if (!req.is("application/json")) {
+        return res.status(415).json(errorBody("UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json"));
+      }
+      const { key } = req.params;
+      const session = await store.getSession(key);
+      if (!session) return res.status(404).json(errorBody("MISSING", `no session ${key}`));
+      if (session.status === "ended") return res.status(409).json(errorBody("ENDED", "session ended"));
+      if (activePolls.get(key)?.listening) {
+        return res.status(409).json(errorBody("LISTENER_ACTIVE", "An agent is already polling this session"));
+      }
+      if (pendingLaunch && Date.now() - pendingLaunch.at < CONNECT_COOLDOWN_MS) {
+        return res.status(409).json(errorBody("CONNECT_PENDING", "A Claude window was just started; wait for it to begin polling"));
+      }
+      const sessionId = crypto.randomUUID();
+      const launch = { key, at: Date.now() };
+      pendingLaunch = launch; // set before any await so a double click cannot start two windows
+      try {
+        await launchClaude({
+          file: session.source_file ?? session.file,
+          cwd: await findRepoRoot(session.dir),
+          sessionId,
+        });
+      } catch (e) {
+        if (pendingLaunch === launch) pendingLaunch = null;
+        const status = LAUNCH_ERROR_STATUS[e?.code];
+        if (!status) throw e;
+        return res.status(status).json(errorBody(e.code, e.message));
+      }
+      await store.setClaudeSession(key, sessionId);
+      broadcast(key, { type: "claude-session", id: sessionId });
+      res.json({ ok: true, claude_session_id: sessionId });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   // GET skips the origin guard, yet a poll consumes feedback: refuse browser cross-site loads.
   // The query never carries agent_reply (writes go through POST).
   app.get("/api/poll", (req, res, next) => {
@@ -418,6 +463,7 @@ export function createServer({
       while (result.status === "waiting" && !timedOut && !vanished && !closing) {
         if (!poll.listening) {
           poll.listening = true;
+          if (pendingLaunch?.key === key) pendingLaunch = null;
           broadcast(key, { type: "presence", listening: true });
           if (timeoutMs > 0) {
             timer = setTimeout(() => {

@@ -20,6 +20,7 @@ export function createChromeHtml(session, { baseUrl } = {}) {
     status: session.status,
     ended_by: session.ended_by ?? null,
     chat: serializeChat(session.chat ?? []),
+    claude_session_id: session.claude_session_id ?? null,
   };
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
   const title = escapeHtml(artifactTitle(session));
@@ -38,7 +39,7 @@ export function createChromeHtml(session, { baseUrl } = {}) {
     <iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups" src="${src}"></iframe>
   </main>
   <aside id="panel">
-    <div id="presenceBanner" hidden></div>
+    <div id="presenceBanner" hidden><span id="presenceText"></span> <button id="connectClaude" type="button">Connect Claude</button></div>
     <div id="endedBanner" role="status" hidden>Session ended<button id="newSession" type="button" hidden>Start new session</button></div>
     <div id="chatLog"></div>
     <div id="queuedLog"></div>

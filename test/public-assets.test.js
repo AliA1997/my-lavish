@@ -70,3 +70,11 @@ test("presence text has its own span", async (t) => {
   assert.ok(source.includes("presenceText.textContent"));
   assert.ok(!source.includes("presenceBanner.textContent"));
 });
+
+test("log entries never use innerHTML", async (t) => {
+  const { baseUrl } = await setup(t);
+  const source = await fetchAsset(baseUrl, "chrome-client.js");
+  assert.equal(source.split("innerHTML").length - 1, 1, "only the existing chat bubble assigns innerHTML");
+  const html = createChromeHtml({ key: "k", file: "f.html", status: "open", chat: [], revision: 0 }, { baseUrl });
+  for (const id of ["tabChat", "tabLog", "claudeLog"]) assert.ok(html.includes(`id="${id}"`));
+});

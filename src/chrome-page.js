@@ -41,7 +41,19 @@ export function createChromeHtml(session, { baseUrl } = {}) {
   <aside id="panel">
     <div id="presenceBanner" hidden><span id="presenceText"></span> <button id="connectClaude" type="button">Connect Claude</button></div>
     <div id="endedBanner" role="status" hidden>Session ended<button id="newSession" type="button" hidden>Start new session</button></div>
+    <div id="tabs" role="tablist">
+      <button id="tabChat" type="button" role="tab" aria-selected="true">Chat</button>
+      <button id="tabLog" type="button" role="tab" aria-selected="false">Claude log</button>
+    </div>
     <div id="chatLog"></div>
+    <div id="claudeLog" hidden>
+      <div id="claudeAttach" hidden>
+        <input id="claudeSessionInput" type="text" placeholder="Claude session id" autocomplete="off" spellcheck="false">
+        <button id="claudeAttachButton" type="button">Attach</button>
+      </div>
+      <p id="claudeStatus"></p>
+      <div id="claudeEntries"></div>
+    </div>
     <div id="queuedLog"></div>
     <div id="composer">
       <button id="annotateToggle" type="button">Annotate</button>

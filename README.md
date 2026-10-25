@@ -97,9 +97,16 @@ One background server is started on demand and reused by later commands. A sessi
 | `playbook [id]` | Lists playbooks, or prints one (`plan`, `diagram`, `table`, `comparison`, `input`) |
 | `server` | Runs the server in the foreground (normally started automatically) |
 
-Flags: `--json` (JSON instead of TOON text), `--no-open` (do not launch a browser), `--reopen`, `--agent-reply <text>`, `--agent-reply-file <path|->`, `--timeout-ms <n>` (poll returns `waiting` after this long), `--help`, `--version`.
+Flags: `--json` (JSON instead of TOON text), `--no-open` (do not launch a browser), `--reopen`, `--with-claude` (on open: also start Claude in a PowerShell window), `--claude-session <uuid>` (on open/poll: tell the panel which Claude session to show), `--agent-reply <text>`, `--agent-reply-file <path|->`, `--timeout-ms <n>` (poll returns `waiting` after this long), `--help`, `--version`.
 
 Every output includes a `next_step` telling the agent what to do next.
+
+## Working with Claude from the page
+
+- **Start new session** appears in the panel after a session ends. It keeps the same file, clears the chat, and keeps any feedback the agent has not collected yet.
+- **Connect Claude** (shown while no agent is polling) opens PowerShell, starts `claude --session-id <uuid>` in the plan's repo root, and tells it to run `see-plan poll`. `see-plan <file> --with-claude` does the same from the command line. Windows only; needs the native `claude.exe` on PATH. Permission prompts are Claude's own; see-plan never passes a permission-bypass flag.
+- **Claude log** tab shows that session's transcript (`~/.claude/projects/*/<session-id>.jsonl`, or `$CLAUDE_CONFIG_DIR`). An agent that is already running can attach itself with `--claude-session <uuid>`, or you can paste the id in the tab. Each refresh reads at most 256 KB and the tab keeps the last 500 entries.
+- Every local process is trusted: the server has no token, so any process on this machine can attach a session id or trigger a launch. Do not run it on a shared machine.
 
 ## Environment variables
 

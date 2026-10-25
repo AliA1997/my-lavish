@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { toToon } from "./toon.js";
 import { assertHtmlFile, canonicalFile } from "./artifact-path.js";
+import { isClaudeSessionId } from "./claude-launcher.js";
 import { ensurePlanHtml, generatedSourceFor, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
 import { SessionStore, sessionKey } from "./session-store.js";
 import { createServer } from "./server.js";
@@ -62,7 +63,8 @@ export function createOpenOutput({ file, url, status, claudeSessionId }) {
       :
       `Do not respond to the user yet. Run \`${POLL_CMD(file)}\` now and leave it running; ` +
       "it stays silent until the user sends feedback or ends the session. " +
-      `After applying feedback, run \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.`,
+      `After applying feedback, run \`${POLL_CMD(file)} --agent-reply "<short summary>"\`. ` +
+      "If you know your Claude session id, pass `--claude-session <id>` so the user can follow your log.",
   };
 }
 
@@ -231,7 +233,7 @@ export async function ensureServer(env) {
 
 // ---------- argument parsing ----------
 
-const VALUE_FLAGS = new Set(["--agent-reply", "--agent-reply-file", "--timeout-ms"]);
+const VALUE_FLAGS = new Set(["--agent-reply", "--agent-reply-file", "--timeout-ms", "--claude-session"]);
 const BOOL_FLAGS = new Set(["--json", "--no-open", "--reopen", "--with-claude", "--help", "-h", "--version"]);
 
 function parseArgs(argv) {
@@ -291,7 +293,21 @@ async function fileContext(file, { regenerate = false } = {}) {
   return out;
 }
 
+function claudeSessionOf(flags) {
+  const id = flags["--claude-session"];
+  if (id !== undefined && !isClaudeSessionId(id)) {
+    throw new CliError("VALIDATION_ERROR", "--claude-session must be a Claude session UUID", "Pass the id Claude reports for this session, or omit the flag.");
+  }
+  return id;
+}
+
+async function attachClaudeSession(baseUrl, key, id, file) {
+  const res = await api(baseUrl, "POST", `/api/${key}/claude-session`, { body: { id }, timeoutMs: 10000 });
+  if (res.status !== 200) throw httpError(res, file);
+}
+
 async function cmdOpen(file, flags, io) {
+  const claudeSession = claudeSessionOf(flags);
   const ctx = await fileContext(file, { regenerate: true });
   file = ctx.display;
   const baseUrl = await ensureServer(io.env);
@@ -301,6 +317,7 @@ async function cmdOpen(file, flags, io) {
   if (res.status !== 200) throw httpError(res, file);
   const { status, url } = res.body;
   if (status === "user-ended") return createUserEndedOutput({ file });
+  if (claudeSession) await attachClaudeSession(baseUrl, res.body.key, claudeSession, file); // the session exists only now
   let shown = status;
   const noOpen = flags["--no-open"] || io.env.MY_LAVISH_NO_OPEN === "1";
   if (!noOpen) {
@@ -321,6 +338,7 @@ async function cmdOpen(file, flags, io) {
 }
 
 async function cmdPoll(file, flags, io) {
+  const claudeSession = claudeSessionOf(flags);
   const ctx = await fileContext(file, { regenerate: true });
   const { real } = ctx;
   file = ctx.display;
@@ -335,6 +353,7 @@ async function cmdPoll(file, flags, io) {
     body.timeoutMs = n;
   }
   const baseUrl = await ensureServer(io.env);
+  if (claudeSession) await attachClaudeSession(baseUrl, ctx.key, claudeSession, file);
   io.stderr.write(`Waiting for feedback on ${file} (stays silent until the user sends)…\n`);
 
   let onSigint;

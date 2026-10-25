@@ -28,6 +28,16 @@
   var sendHint = document.getElementById("sendHint");
   var endedBanner = document.getElementById("endedBanner");
   var newSessionButton = document.getElementById("newSession");
+  var tabChat = document.getElementById("tabChat");
+  var tabLog = document.getElementById("tabLog");
+  var claudeLog = document.getElementById("claudeLog");
+  var claudeAttach = document.getElementById("claudeAttach");
+  var claudeInput = document.getElementById("claudeSessionInput");
+  var claudeAttachButton = document.getElementById("claudeAttachButton");
+  var claudeStatus = document.getElementById("claudeStatus");
+  var claudeEntries = document.getElementById("claudeEntries");
+  var LOG_POLL_MS = 2000;
+  var MAX_LOG_ENTRIES = 500;
 
   var queue = loadQueue();
   var ended = false;
@@ -38,6 +48,11 @@
   var pendingRestore = null;
   var snapshotWaiters = {};
   var reconnectAttempt = 0;
+  var claudeSessionId = typeof boot.claude_session_id === "string" ? boot.claude_session_id : "";
+  var logVisible = false;
+  var logNext = null; // byte offset to continue from; null means the first (tail) request
+  var logTimer = null;
+  var logBusy = false;
   var shownRevision = (function () {
     var m = /[?&]rev=(\d+)/.exec(frame ? frame.getAttribute("src") || "" : "");
     return m ? Number(m[1]) : 0;
@@ -146,7 +161,7 @@
       bubble.appendChild(element("div", "text", item.prompt));
       queuedLog.appendChild(bubble);
     });
-    queuedLog.hidden = queue.length === 0;
+    queuedLog.hidden = queue.length === 0 || logVisible;
   }
 
   function showHint(text, isError) {
@@ -431,6 +446,110 @@
       });
   }
 
+  // ---- Claude log tab ------------------------------------------------------
+
+  function selectTab(showLog) {
+    logVisible = showLog;
+    chatLog.hidden = showLog;
+    claudeLog.hidden = !showLog;
+    if (showLog) queuedLog.hidden = true;
+    else renderQueue();
+    tabChat.setAttribute("aria-selected", showLog ? "false" : "true");
+    tabLog.setAttribute("aria-selected", showLog ? "true" : "false");
+    if (showLog) refreshLog();
+    else clearTimeout(logTimer);
+  }
+
+  function waitingText() {
+    return "Waiting for Claude's log for session " + claudeSessionId + "\u2026";
+  }
+
+  function resetLog() {
+    logNext = null;
+    claudeEntries.textContent = "";
+    claudeAttach.hidden = Boolean(claudeSessionId);
+    claudeStatus.textContent = claudeSessionId
+      ? waitingText()
+      : "No Claude session is attached yet. Use Connect Claude, or paste a session id.";
+  }
+
+  function addLogEntry(entry) {
+    if (!entry || typeof entry !== "object") return;
+    var row = element("div", "log-entry " + String(entry.kind || "text").replace(/[^a-z_]/g, ""));
+    var who = entry.role === "assistant" ? "Claude" : "User";
+    var kind = entry.kind === "tool_use" ? " \u00b7 tool call" : entry.kind === "tool_result" ? " \u00b7 tool result" : "";
+    row.appendChild(element("div", "log-label", who + kind));
+    row.appendChild(element("div", "log-text", String(entry.text || ""))); // textContent only: tool output is untrusted
+    if (entry.at) row.title = String(entry.at);
+    claudeEntries.appendChild(row);
+  }
+
+  function refreshLog() {
+    clearTimeout(logTimer);
+    if (!logVisible || logBusy) return;
+    if (!claudeSessionId) return;
+    logBusy = true;
+    var url = "/api/" + encodeURIComponent(key) + "/claude-log" + (logNext === null ? "" : "?after=" + logNext);
+    fetch(url)
+      .then(readJson)
+      .then(function (body) {
+        if (!body || !Array.isArray(body.entries)) return;
+        if (!body.found) {
+          claudeStatus.textContent = waitingText();
+          return;
+        }
+        var first = logNext === null;
+        if (body.omitted && !first) claudeEntries.textContent = ""; // the file was replaced: start over
+        if (body.omitted) claudeStatus.textContent = "Earlier entries omitted";
+        else if (first) claudeStatus.textContent = body.entries.length ? "" : "Claude has not written anything yet.";
+        else if (body.entries.length) claudeStatus.textContent = "";
+        body.entries.forEach(addLogEntry);
+        while (claudeEntries.childNodes.length > MAX_LOG_ENTRIES) claudeEntries.removeChild(claudeEntries.firstChild);
+        if (typeof body.next === "number") logNext = body.next;
+        if (body.entries.length) claudeLog.scrollTop = claudeLog.scrollHeight;
+      })
+      .catch(function () {
+        // transient: try again on the next tick
+      })
+      .then(function () {
+        logBusy = false;
+        if (logVisible) logTimer = setTimeout(refreshLog, LOG_POLL_MS);
+      });
+  }
+
+  function onClaudeSession(id) {
+    claudeSessionId = id;
+    resetLog();
+    if (logVisible) refreshLog();
+  }
+
+  function attachClaudeSession() {
+    var id = claudeInput.value.trim();
+    if (!id) return;
+    claudeAttachButton.disabled = true;
+    fetch("/api/" + encodeURIComponent(key) + "/claude-session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: id }),
+    })
+      .then(function (res) {
+        return readJson(res).then(function (body) {
+          if (res.ok) {
+            onClaudeSession(id);
+            claudeInput.value = "";
+          } else {
+            claudeStatus.textContent = errorMessage(body, res.status);
+          }
+        });
+      })
+      .catch(function (e) {
+        claudeStatus.textContent = "Could not reach see-plan: " + (e && e.message ? e.message : e);
+      })
+      .then(function () {
+        claudeAttachButton.disabled = false;
+      });
+  }
+
   // ---- live events ---------------------------------------------------------
 
   function onServerEvent(msg) {
@@ -447,6 +566,8 @@
       frame.src = "/artifact/" + encodeURIComponent(key) + "/index.html?rev=" + encodeURIComponent(String(msg.revision));
     } else if (msg.type === "ended") {
       setEnded();
+    } else if (msg.type === "claude-session" && typeof msg.id === "string") {
+      onClaudeSession(msg.id);
     } else if (msg.type === "new-session") {
       window.location.reload();
     }
@@ -500,6 +621,19 @@
   endButton.addEventListener("click", endSession);
   newSessionButton.addEventListener("click", startNewSession);
   connectButton.addEventListener("click", connectClaude);
+  tabChat.addEventListener("click", function () { selectTab(false); });
+  tabLog.addEventListener("click", function () { selectTab(true); });
+  claudeAttachButton.addEventListener("click", attachClaudeSession);
+  claudeInput.addEventListener("keydown", function (event) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      attachClaudeSession();
+    }
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) clearTimeout(logTimer);
+    else if (logVisible) refreshLog();
+  });
   annotateButton.addEventListener("click", toggleAnnotate);
   document.addEventListener("keydown", function (event) {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
@@ -512,6 +646,7 @@
   renderChat(Array.isArray(boot.chat) ? boot.chat : []);
   renderQueue();
   renderControls();
+  resetLog();
   if (boot.status === "ended") setEnded();
   connect();
 })();

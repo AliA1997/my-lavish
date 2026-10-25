@@ -246,3 +246,16 @@ test("open --with-claude prints the claude session id", async (t) => {
   assert.match(out.next_step, /do not poll from here/);
   assert.deepEqual(seen, [{ url: "/api/abc/connect-claude", type: "application/json", body: "{}" }]);
 });
+
+test("poll --claude-session rejects a bad id", async (t) => {
+  const { dir, file } = await tmpHtml(t);
+  let requests = 0;
+  const port = await fakeServer(t, (req, res) => {
+    requests++;
+    res.end("{}");
+  });
+  const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
+  assert.equal(await run(["poll", file, "--claude-session", "nope", "--json"], a.io), 1);
+  assert.equal(JSON.parse(a.stdout()).error.code, "VALIDATION_ERROR");
+  assert.equal(requests, 0);
+});

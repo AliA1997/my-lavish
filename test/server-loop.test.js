@@ -592,3 +592,92 @@ test("connect-claude maps launcher failures", async (t) => {
   const again = await postJson(`/api/${key}/connect-claude`, {});
   assert.equal(again.status, 424, "a failed launch does not block a retry");
 });
+
+const CLAUDE_ID = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
+
+async function claudeFixture(t) {
+  const claudeDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-srv-claude-"));
+  t.after(() => fs.promises.rm(claudeDir, { recursive: true, force: true }));
+  const dir = path.join(claudeDir, "projects", "C--x");
+  await fs.promises.mkdir(dir, { recursive: true });
+  const transcript = path.join(dir, `${CLAUDE_ID}.jsonl`);
+  const row = (text) => JSON.stringify({ type: "user", message: { content: text }, timestamp: "t" }) + "\n";
+  await fs.promises.writeFile(transcript, row("one") + row("two"));
+  return { claudeDir, transcript, row };
+}
+
+test("claude-log returns entries after attaching", async (t) => {
+  const { claudeDir } = await claudeFixture(t);
+  const { key, baseUrl, postJson } = await setup(t, { claudeDir });
+  const none = await (await fetch(`${baseUrl}/api/${key}/claude-log`)).json();
+  assert.deepEqual([none.claude_session_id, none.found, none.entries], [null, false, []]);
+  const attach = await postJson(`/api/${key}/claude-session`, { id: CLAUDE_ID });
+  assert.equal(attach.status, 200);
+  const log = await (await fetch(`${baseUrl}/api/${key}/claude-log`)).json();
+  assert.equal(log.found, true);
+  assert.equal(log.entries.length, 2);
+  const again = await (await fetch(`${baseUrl}/api/${key}/claude-log?after=${log.next}`)).json();
+  assert.deepEqual(again.entries, []);
+});
+
+test("claude-log does not re-read state.json", async (t) => {
+  const { claudeDir } = await claudeFixture(t);
+  const { srv, key, baseUrl, postJson, tmp } = await setup(t, { claudeDir });
+  await postJson(`/api/${key}/claude-session`, { id: CLAUDE_ID });
+  // Spy on a second server's store would not observe this one, so count reads of state.json instead.
+  const stateFile = path.join(tmp, "state", "state.json");
+  const originalReadFile = fs.promises.readFile;
+  let stateReads = 0;
+  fs.promises.readFile = (p, ...rest) => {
+    if (String(p) === stateFile) stateReads++;
+    return originalReadFile(p, ...rest);
+  };
+  try {
+    for (let i = 0; i < 4; i++) await (await fetch(`${baseUrl}/api/${key}/claude-log`)).json();
+  } finally {
+    fs.promises.readFile = originalReadFile;
+  }
+  assert.equal(stateReads, 0);
+  void srv;
+});
+
+test("claude-log fills its map from the store once", async (t) => {
+  const { claudeDir } = await claudeFixture(t);
+  const { key, baseUrl, tmp } = await setup(t, { claudeDir });
+  // Write the id straight into the store, as a previous server run would have.
+  const store = new SessionStore(path.join(tmp, "state"));
+  await store.setClaudeSession(key, CLAUDE_ID);
+  const stateFile = path.join(tmp, "state", "state.json");
+  const originalReadFile = fs.promises.readFile;
+  let stateReads = 0;
+  fs.promises.readFile = (p, ...rest) => {
+    if (String(p) === stateFile) stateReads++;
+    return originalReadFile(p, ...rest);
+  };
+  try {
+    const first = await (await fetch(`${baseUrl}/api/${key}/claude-log`)).json();
+    assert.equal(first.found, true);
+    for (let i = 0; i < 3; i++) await (await fetch(`${baseUrl}/api/${key}/claude-log`)).json();
+  } finally {
+    fs.promises.readFile = originalReadFile;
+  }
+  assert.equal(stateReads, 1);
+});
+
+test("claude-log clamps after", async (t) => {
+  const { claudeDir } = await claudeFixture(t);
+  const { key, baseUrl, postJson } = await setup(t, { claudeDir });
+  await postJson(`/api/${key}/claude-session`, { id: CLAUDE_ID });
+  const base = await (await fetch(`${baseUrl}/api/${key}/claude-log?after=0`)).json();
+  for (const after of ["-5", "abc"]) {
+    const r = await (await fetch(`${baseUrl}/api/${key}/claude-log?after=${after}`)).json();
+    assert.deepEqual(r, base);
+  }
+});
+
+test("claude-session rejects a non-uuid", async (t) => {
+  const { key, postJson } = await setup(t);
+  const res = await postJson(`/api/${key}/claude-session`, { id: "../../etc/passwd" });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error.code, "VALIDATION_ERROR");
+});

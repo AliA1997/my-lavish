@@ -1,6 +1,8 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
@@ -11,6 +13,7 @@ import { createChromeHtml } from "./chrome-page.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
 import { isMarkdownPath } from "./plan-markdown.js";
+import { findTranscript, readTranscript } from "./claude-log.js";
 import { findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
@@ -76,6 +79,7 @@ export function createServer({
   version,
   log = () => {},
   launchClaude = realLaunchClaude,
+  claudeDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"),
 }) {
   const app = express();
   const events = new EventEmitter();
@@ -89,6 +93,7 @@ export function createServer({
   let closing = null;
   let pingTimer = null;
   let idleTimer = null;
+  const claudeLinks = new Map(); // key -> { claudeSessionId, transcriptPath }: keeps state.json off the log hot path
   let pendingLaunch = null; // { key, at }: one launch at a time across the whole server
 
   function track(promise) {
@@ -302,6 +307,7 @@ export function createServer({
       } catch (e) {
         return sendStoreError(res, e);
       }
+      claudeLinks.delete(key);
       broadcast(key, { type: "new-session" });
       res.json({ ok: true, status: session.status });
     } catch (e) {
@@ -341,8 +347,63 @@ export function createServer({
         return res.status(status).json(errorBody(e.code, e.message));
       }
       await store.setClaudeSession(key, sessionId);
+      claudeLinks.set(key, { claudeSessionId: sessionId, transcriptPath: null });
       broadcast(key, { type: "claude-session", id: sessionId });
       res.json({ ok: true, claude_session_id: sessionId });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/claude-session", async (req, res, next) => {
+    try {
+      if (!req.is("application/json")) {
+        return res.status(415).json(errorBody("UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json"));
+      }
+      const { key } = req.params;
+      const { id } = req.body ?? {};
+      if (!isClaudeSessionId(id)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "id must be a Claude session UUID"));
+      }
+      try {
+        await store.setClaudeSession(key, id);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      claudeLinks.set(key, { claudeSessionId: id, transcriptPath: null });
+      broadcast(key, { type: "claude-session", id });
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/:key/claude-log", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      }
+      const { key } = req.params;
+      let link = claudeLinks.get(key);
+      if (!link) {
+        const session = await store.getSession(key);
+        if (!session) return res.status(404).json(errorBody("MISSING", `no session ${key}`));
+        link = { claudeSessionId: session.claude_session_id ?? null, transcriptPath: null };
+        claudeLinks.set(key, link);
+      }
+      const empty = { claude_session_id: link.claudeSessionId, found: false, entries: [], next: 0, omitted: false };
+      if (!link.claudeSessionId) return res.json(empty);
+      if (!link.transcriptPath) link.transcriptPath = await findTranscript(link.claudeSessionId, { claudeDir });
+      if (!link.transcriptPath) return res.json(empty);
+      const raw = req.query.after;
+      const after = raw === undefined ? undefined : Math.max(0, Math.floor(Number(raw)) || 0);
+      try {
+        res.json({ ...empty, found: true, ...(await readTranscript(link.transcriptPath, { after })) });
+      } catch (e) {
+        if (e?.code !== "ENOENT") throw e;
+        link.transcriptPath = null; // the file moved or was removed: look again next time
+        res.json(empty);
+      }
     } catch (e) {
       next(e);
     }

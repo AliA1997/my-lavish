@@ -5,6 +5,6 @@ description: Use when a plan, comparison, diagram, table, or report would be eas
 
 # my-lavish
 
-Run `my-lavish-axi --help`, then `my-lavish-axi design` and `my-lavish-axi playbook <id>` for the current instructions.
+Run `see-plan --help`, then `see-plan design` and `see-plan playbook <id>` for the current instructions.
 
-Then write the HTML file and run `my-lavish-axi <file>`.
+Then write the HTML file and run `see-plan <file>`.

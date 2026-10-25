@@ -1,4 +1,4 @@
-/* my-lavish-axi annotation SDK, injected into the artifact page.
+/* see-plan annotation SDK, injected into the artifact page.
  * Classic script (no imports). Everything lives in one IIFE so the only global
  * it adds to the artifact is the public `window.lavish` API.
  * The artifact runs in a sandboxed iframe with an opaque origin, so this file

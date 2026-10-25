@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "my-lavish-axi": "bin/my-lavish-axi.js"
+    "see-plan": "bin/see-plan.js"
   },
   "engines": {
     "node": ">=22"

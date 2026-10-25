@@ -73,12 +73,12 @@ export const PLAYBOOKS = [
 ];
 
 export const HOME_USAGE = [
-  "my-lavish-axi <file.html>              open the artifact in the browser",
-  "my-lavish-axi poll <file>              wait for the human's feedback (--agent-reply, --agent-reply-file, --timeout-ms)",
-  "my-lavish-axi reply <file>             post a chat reply without polling (--agent-reply)",
-  "my-lavish-axi end <file>               end the session",
-  "my-lavish-axi design                   page design rules",
-  "my-lavish-axi playbook [id]            page recipes: plan, diagram, table, comparison, input",
-  "my-lavish-axi stop                     stop the local server",
+  "see-plan <file.html>              open the artifact in the browser",
+  "see-plan poll <file>              wait for the human's feedback (--agent-reply, --agent-reply-file, --timeout-ms)",
+  "see-plan reply <file>             post a chat reply without polling (--agent-reply)",
+  "see-plan end <file>               end the session",
+  "see-plan design                   page design rules",
+  "see-plan playbook [id]            page recipes: plan, diagram, table, comparison, input",
+  "see-plan stop                     stop the local server",
   "flags: --json, --no-open, --reopen, --version, --help",
 ].join("\n");

@@ -123,7 +123,7 @@ test("poll reports LISTENER_ACTIVE on 409", async (t) => {
   assert.equal(out.error.code, "LISTENER_ACTIVE");
   assert.match(out.next_step, /another poll is already listening/i);
   assert.match(out.next_step, /re-send your reply/i);
-  assert.match(out.next_step, /my-lavish-axi stop/);
+  assert.match(out.next_step, /see-plan stop/);
 });
 
 test("diagram playbook does not tell agents to annotate via data-lavish-action", async () => {
@@ -162,4 +162,15 @@ test("poll rejects both reply flags", async (t) => {
   const a = fakeIo();
   assert.equal(await run(["poll", file, "--agent-reply", "x", "--agent-reply-file", "y", "--json"], a.io), 1);
   assert.equal(JSON.parse(a.stdout()).error.code, "VALIDATION_ERROR");
+});
+
+test("next_step strings name see-plan", () => {
+  const out = createPollOutput({ file: "f.html", response: { status: "waiting" } });
+  assert.match(out.next_step, /`see-plan poll f\.html`/);
+  assert.doesNotMatch(JSON.stringify(out), /my-lavish-axi/);
+});
+
+test("package bin is see-plan", async () => {
+  const pkg = JSON.parse(await fs.promises.readFile(new URL("../package.json", import.meta.url), "utf8"));
+  assert.deepEqual(pkg.bin, { "see-plan": "bin/see-plan.js" });
 });

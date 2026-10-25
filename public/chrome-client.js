@@ -1,4 +1,4 @@
-/* my-lavish-axi chrome page: conversation panel, prompt queue, send, live events.
+/* see-plan chrome page: conversation panel, prompt queue, send, live events.
  * Classic script (no imports). User-controlled strings (chat text, anchors,
  * queued prompts) are only ever set through textContent; agent entries arrive
  * as server-rendered, escaped Markdown HTML. */
@@ -8,7 +8,7 @@
   var SOURCE = "my-lavish";
   var SNAPSHOT_TIMEOUT_MS = 5000;
   var RECONNECT_DELAYS_MS = [1000, 2000, 5000];
-  var NOT_LISTENING = "Your agent is not listening. Ask it to run my-lavish-axi poll.";
+  var NOT_LISTENING = "Your agent is not listening. Ask it to run see-plan poll.";
 
   var boot = readBootstrap();
   var key = typeof boot.key === "string" ? boot.key : "";
@@ -346,7 +346,7 @@
         });
       })
       .catch(function (e) {
-        showHint("Could not reach my-lavish-axi: " + (e && e.message ? e.message : e), true);
+        showHint("Could not reach see-plan: " + (e && e.message ? e.message : e), true);
       })
       .then(function () {
         sending = false;
@@ -371,7 +371,7 @@
         });
       })
       .catch(function (e) {
-        showHint("Could not reach my-lavish-axi: " + (e && e.message ? e.message : e), true);
+        showHint("Could not reach see-plan: " + (e && e.message ? e.message : e), true);
       })
       .then(function () {
         sending = false;

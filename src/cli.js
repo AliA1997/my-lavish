@@ -11,7 +11,8 @@ import { createServer } from "./server.js";
 import { DESIGN_TEXT, PLAYBOOKS, HOME_USAGE } from "./guidance.js";
 
 const APP = "my-lavish-axi";
-const BIN_PATH = fileURLToPath(new URL("../bin/my-lavish-axi.js", import.meta.url));
+export const CMD = "see-plan";
+const BIN_PATH = fileURLToPath(new URL("../bin/see-plan.js", import.meta.url));
 const PACKAGE_PATH = fileURLToPath(new URL("../package.json", import.meta.url));
 
 class CliError extends Error {
@@ -48,7 +49,7 @@ export function shellQuote(p) {
   return /[\s"'`$&|;<>()*?!#~^%{}\[\]\\]/.test(p) ? JSON.stringify(p) : p;
 }
 
-const POLL_CMD = (file) => `my-lavish-axi poll ${shellQuote(file)}`;
+const POLL_CMD = (file) => `${CMD} poll ${shellQuote(file)}`;
 
 export function createOpenOutput({ file, url, status }) {
   return {
@@ -65,7 +66,7 @@ export function createUserEndedOutput({ file }) {
     session: { file, status: "user-ended" },
     next_step:
       "The user ended this session. Give any updates in chat and do not poll. " +
-      `Use \`my-lavish-axi ${shellQuote(file)} --reopen\` only if the user asks to reopen it.`,
+      `Use \`see-plan ${shellQuote(file)} --reopen\` only if the user asks to reopen it.`,
   };
 }
 
@@ -94,7 +95,7 @@ export function createHomeOutput({ sessions }) {
   return {
     sessions: sessions.map(({ file, status, url }) => ({ file, status, url })),
     usage: HOME_USAGE,
-    next_step: "Open an HTML artifact with `my-lavish-axi <file.html>`, or read `my-lavish-axi design` and `my-lavish-axi playbook` before writing one.",
+    next_step: "Open an HTML artifact with `see-plan <file.html>`, or read `see-plan design` and `see-plan playbook` before writing one.",
   };
 }
 
@@ -143,13 +144,13 @@ async function api(baseUrl, method, urlPath, opts) {
 function httpError(res, file) {
   const code = res.body?.error?.code;
   if (res.status === 404 && res.body?.status === "missing") {
-    return new CliError("NOT_FOUND", `No session for ${file}`, `Run \`my-lavish-axi ${shellQuote(file)}\` to open it first.`);
+    return new CliError("NOT_FOUND", `No session for ${file}`, `Run \`see-plan ${shellQuote(file)}\` to open it first.`);
   }
   if (code === "LISTENER_ACTIVE") {
     return new CliError(
       code,
       res.body.error.message ?? "Another poll is already listening",
-      "Another poll is already listening for this file. If that poll is yours and still running, wait for it. If no poll of yours is running (a killed shell can leave an orphan), run `my-lavish-axi stop` (restarts the server and releases the stale listener), then re-run poll and re-send your reply with that poll (this reply was not recorded).",
+      "Another poll is already listening for this file. If that poll is yours and still running, wait for it. If no poll of yours is running (a killed shell can leave an orphan), run `see-plan stop` (restarts the server and releases the stale listener), then re-run poll and re-send your reply with that poll (this reply was not recorded).",
     );
   }
   return new CliError(
@@ -236,7 +237,7 @@ function parseArgs(argv) {
     } else if (BOOL_FLAGS.has(a)) {
       flags[a] = true;
     } else if (a.startsWith("--")) {
-      throw new CliError("VALIDATION_ERROR", `Unknown flag: ${a}`, "Run `my-lavish-axi --help` for usage.");
+      throw new CliError("VALIDATION_ERROR", `Unknown flag: ${a}`, "Run `see-plan --help` for usage.");
     } else {
       positional.push(a);
     }
@@ -335,7 +336,7 @@ async function cmdReply(file, flags, io) {
   const { key } = await fileContext(file);
   const text = await agentReplyOf(flags);
   if (text === undefined) {
-    throw new CliError("VALIDATION_ERROR", "reply needs --agent-reply or --agent-reply-file", 'Run `my-lavish-axi reply <file> --agent-reply "<text>"`.');
+    throw new CliError("VALIDATION_ERROR", "reply needs --agent-reply or --agent-reply-file", 'Run `see-plan reply <file> --agent-reply "<text>"`.');
   }
   const baseUrl = await ensureServer(io.env);
   const res = await api(baseUrl, "POST", `/api/${key}/agent-reply`, { body: { text }, timeoutMs: 10000 });
@@ -404,16 +405,16 @@ function cmdPlaybook(id) {
   if (!id) {
     return {
       playbooks: PLAYBOOKS.map(({ id: pid, use_when }) => ({ id: pid, use_when })),
-      next_step: "Open every playbook whose use_when matches before writing HTML: my-lavish-axi playbook <id>",
+      next_step: "Open every playbook whose use_when matches before writing HTML: see-plan playbook <id>",
     };
   }
   const pb = PLAYBOOKS.find((p) => p.id === id);
   if (!pb) {
-    throw new CliError("NOT_FOUND", `No playbook "${id}"`, `Run \`my-lavish-axi playbook\` to list ids: ${PLAYBOOKS.map((p) => p.id).join(", ")}.`);
+    throw new CliError("NOT_FOUND", `No playbook "${id}"`, `Run \`see-plan playbook\` to list ids: ${PLAYBOOKS.map((p) => p.id).join(", ")}.`);
   }
   return {
     playbook: { id: pb.id, use_when: pb.use_when, guidance: pb.guidance },
-    next_step: "Apply this guidance, then write the HTML and run `my-lavish-axi <file.html>`.",
+    next_step: "Apply this guidance, then write the HTML and run `see-plan <file.html>`.",
   };
 }
 
@@ -440,9 +441,9 @@ export async function run(argv, io = { stdout: process.stdout, stderr: process.s
     else if (first === "end") result = await cmdEnd(second, io);
     else if (first === "stop") result = await cmdStop(io);
     else if (first === "server") result = await cmdServer(io);
-    else if (first === "design") result = { design: DESIGN_TEXT, next_step: "Apply these rules, then check `my-lavish-axi playbook` for page recipes." };
+    else if (first === "design") result = { design: DESIGN_TEXT, next_step: "Apply these rules, then check `see-plan playbook` for page recipes." };
     else if (first === "playbook") result = cmdPlaybook(second);
-    else throw new CliError("VALIDATION_ERROR", `Unknown command: ${first}`, "Run `my-lavish-axi --help` for usage.");
+    else throw new CliError("VALIDATION_ERROR", `Unknown command: ${first}`, "Run `see-plan --help` for usage.");
     if (result) emit(result);
     return 0;
   } catch (e) {

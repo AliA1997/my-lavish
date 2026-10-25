@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const BIN = path.join(ROOT, "bin", "my-lavish-axi.js");
+const BIN = path.join(ROOT, "bin", "see-plan.js");
 const EXAMPLE = path.join(ROOT, "examples", "plan.html");
 
 function freePort() {

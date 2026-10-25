@@ -174,3 +174,52 @@ test("package bin is see-plan", async () => {
   const pkg = JSON.parse(await fs.promises.readFile(new URL("../package.json", import.meta.url), "utf8"));
   assert.deepEqual(pkg.bin, { "see-plan": "bin/see-plan.js" });
 });
+
+async function mdEnv(t) {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-cli-md-"));
+  const env = { ...process.env, MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(await freePort()), MY_LAVISH_NO_OPEN: "1" };
+  t.after(async () => {
+    await run(["stop"], fakeIo(env).io).catch(() => {});
+    await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+  return { dir, env };
+}
+
+test("open accepts a .md file", async (t) => {
+  const { dir, env } = await mdEnv(t);
+  const md = path.join(dir, "notes.md");
+  await fs.promises.writeFile(md, "# Notes");
+  const o = fakeIo(env);
+  assert.equal(await run(["notes.md".replace("notes.md", md), "--no-open", "--json"], o.io), 0);
+  assert.match(JSON.parse(o.stdout()).session.file, /notes\.md$/);
+  assert.ok(fs.existsSync(path.join(dir, "notes.html")));
+  const state = JSON.parse(await fs.promises.readFile(path.join(dir, "state.json"), "utf8"));
+  const [s] = Object.values(state.sessions);
+  assert.match(s.file, /notes\.html$/);
+  assert.match(s.source_file, /notes\.md$/);
+});
+
+test("opening generated html maps back to its md", async (t) => {
+  const { dir, env } = await mdEnv(t);
+  const md = path.join(dir, "notes.md");
+  await fs.promises.writeFile(md, "# Notes");
+  assert.equal(await run([md, "--no-open", "--json"], fakeIo(env).io), 0);
+  const o = fakeIo(env);
+  assert.equal(await run([path.join(dir, "notes.html"), "--no-open", "--json"], o.io), 0);
+  assert.match(JSON.parse(o.stdout()).session.file, /notes\.md$/);
+  const state = JSON.parse(await fs.promises.readFile(path.join(dir, "state.json"), "utf8"));
+  assert.match(Object.values(state.sessions)[0].source_file, /notes\.md$/);
+
+  await fs.promises.writeFile(md, "# Changed heading");
+  const later = new Date(Date.now() + 5000);
+  await fs.promises.utimes(md, later, later);
+  const p = fakeIo(env);
+  assert.equal(await run(["poll", path.join(dir, "notes.html"), "--timeout-ms", "200", "--json"], p.io), 0);
+  assert.match(await fs.promises.readFile(path.join(dir, "notes.html"), "utf8"), /Changed heading/);
+});
+
+test("poll next_step names the md", () => {
+  const out = createPollOutput({ file: "notes.md", response: { status: "feedback", prompts: [{ prompt: "x" }] } });
+  assert.match(out.next_step, /Apply each prompt to `notes\.md`/);
+  assert.doesNotMatch(out.next_step, /HTML file in place/);
+});

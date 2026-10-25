@@ -131,3 +131,16 @@ test("20 concurrent queuePrompts", async (t) => {
   assert.equal(rs.reduce((n, r) => n + r.accepted, 0), 20);
   assert.equal((await s.takeFeedback(session.key)).prompts.length, 20);
 });
+
+test("source_file must match the html", async () => {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-store-"));
+  const store = new SessionStore(dir);
+  const file = path.join(dir, "a.html");
+  await assert.rejects(
+    store.upsertSession(file, "http://x", { source_file: path.join(dir, "b.md") }),
+    { code: "VALIDATION_ERROR" },
+  );
+  const { session } = await store.upsertSession(file, "http://x", { source_file: path.join(dir, "a.md") });
+  assert.equal(session.source_file, path.join(dir, "a.md"));
+  await fs.promises.rm(dir, { recursive: true, force: true });
+});

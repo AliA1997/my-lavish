@@ -87,7 +87,7 @@ One background server is started on demand and reused by later commands. A sessi
 | Command | What it does |
 | --- | --- |
 | `see-plan` | Lists known sessions and usage |
-| `see-plan <file.html>` / `open <file>` | Opens (or reopens) the session and the browser. A session the user ended is refused unless `--reopen` is given |
+| `see-plan <file.html|file.md>` / `open <file>` | A `.md` plan is converted to a sibling `.html` (regenerated when the `.md` is newer, never over a hand-written `.html`); agents edit the `.md`. Opens (or reopens) the session and the browser. A session the user ended is refused unless `--reopen` is given |
 | `poll <file>` | Blocks until the user sends feedback or ends the session; prints prompts, `next_step`, and a DOM snapshot |
 | `poll <file> --agent-reply "<text>"` | Posts a reply to the chat, then polls |
 | `reply <file> --agent-reply "<text>"` | Posts a reply without polling |

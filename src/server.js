@@ -9,6 +9,7 @@ import { injectSdk } from "./html-transform.js";
 import { createChromeHtml } from "./chrome-page.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
+import { isMarkdownPath } from "./plan-markdown.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -175,7 +176,7 @@ export function createServer({
 
   app.post("/api/sessions", async (req, res, next) => {
     try {
-      const { file, reopen } = req.body ?? {};
+      const { file, reopen, source_file: sourceFile } = req.body ?? {};
       if (typeof file !== "string" || !file) {
         return res.status(400).json(errorBody("VALIDATION_ERROR", "file is required"));
       }
@@ -189,7 +190,22 @@ export function createServer({
         }
         throw e;
       }
-      const { status, session } = await store.upsertSession(real, baseUrl, { reopen: Boolean(reopen) });
+      let source;
+      if (sourceFile !== undefined) {
+        try {
+          if (typeof sourceFile !== "string" || !isMarkdownPath(sourceFile)) throw new StoreError("VALIDATION_ERROR", "source_file must be a .md or .markdown path");
+          source = await canonicalFile(sourceFile);
+        } catch (e) {
+          return res.status(400).json(errorBody("VALIDATION_ERROR", e instanceof StoreError ? e.message : "source_file not found"));
+        }
+      }
+      let result;
+      try {
+        result = await store.upsertSession(real, baseUrl, { reopen: Boolean(reopen), source_file: source });
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      const { status, session } = result;
       await watchSession(session);
       res.json({ status, key: session.key, url: session.url });
     } catch (e) {

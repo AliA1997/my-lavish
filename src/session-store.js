@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { Mutex } from "./async-mutex.js";
+import { htmlPathFor } from "./plan-markdown.js";
 
 export function sessionKey(file) {
   return crypto.createHash("sha256").update(file).digest("hex").slice(0, 16);
@@ -70,8 +71,11 @@ export class SessionStore {
     return s;
   }
 
-  upsertSession(file, baseUrl, { reopen = false } = {}) {
+  upsertSession(file, baseUrl, { reopen = false, source_file } = {}) {
     return this.#tx((state) => {
+      if (source_file !== undefined && htmlPathFor(source_file) !== file) {
+        throw new StoreError("VALIDATION_ERROR", "source_file must be the Markdown source of file");
+      }
       const key = sessionKey(file);
       const existing = state.sessions[key];
       if (!existing) {
@@ -81,6 +85,7 @@ export class SessionStore {
           status: "open", prompts: [], dom_snapshot: "", chat: [], revision: 0,
           created_at: t, updated_at: t,
         };
+        if (source_file !== undefined) session.source_file = source_file;
         state.sessions[key] = session;
         return [{ status: "opened", session }, true];
       }
@@ -88,6 +93,7 @@ export class SessionStore {
         return [{ status: "user-ended", session: existing }, false];
       }
       existing.url = `${baseUrl}/session/${key}`;
+      if (source_file !== undefined) existing.source_file = source_file;
       if (existing.status === "ended") {
         existing.status = existing.prompts.length ? "feedback" : "open";
         delete existing.ended_by;

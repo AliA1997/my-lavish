@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { toToon } from "./toon.js";
 import { assertHtmlFile, canonicalFile } from "./artifact-path.js";
+import { ensurePlanHtml, generatedSourceFor, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
 import { SessionStore, sessionKey } from "./session-store.js";
 import { createServer } from "./server.js";
 import { DESIGN_TEXT, PLAYBOOKS, HOME_USAGE } from "./guidance.js";
@@ -71,6 +72,7 @@ export function createUserEndedOutput({ file }) {
 }
 
 export function createPollOutput({ file, response }) {
+  const markdown = isMarkdownPath(file);
   const status = response.status;
   const out = { session: { file, status } };
   if (response.ended_by) out.session.ended_by = response.ended_by;
@@ -78,8 +80,10 @@ export function createPollOutput({ file, response }) {
   if (response.prompts) out.prompts = response.prompts;
   if (status === "feedback") {
     out.next_step = response.session_ended
-      ? "The user ended the session with this feedback. Apply the changes to the HTML file, report what you did in chat, and do not poll again."
-      : `Apply each prompt to the HTML file in place (\`selector\` says where), then poll again with \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.`;
+      ? `The user ended the session with this feedback. Apply the changes to ${markdown ? `\`${file}\`` : "the HTML file"}, report what you did in chat, and do not poll again.`
+      : markdown
+        ? `Apply each prompt to \`${file}\` (the HTML is generated from it; \`selector\` refers to the rendered page), then poll again with \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.`
+        : `Apply each prompt to the HTML file in place (\`selector\` says where), then poll again with \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.`;
   } else if (status === "ended") {
     out.next_step = "The session is ended. Stop polling and do not reopen it unless the user asks.";
   } else if (status === "waiting") {
@@ -268,17 +272,28 @@ async function agentReplyOf(flags) {
 
 // ---------- commands ----------
 
-async function fileContext(file) {
-  if (!file) throw new CliError("VALIDATION_ERROR", "A file argument is required", "Pass the HTML file path.");
-  await assertHtmlFile(file);
-  const real = await canonicalFile(file);
-  return { real, key: sessionKey(real) };
+/** Maps a Markdown plan (or the html generated from one) to its html artifact. */
+async function fileContext(file, { regenerate = false } = {}) {
+  if (!file) throw new CliError("VALIDATION_ERROR", "A file argument is required", "Pass the plan file path (.html or .md).");
+  let source = isMarkdownPath(file) ? file : await generatedSourceFor(file);
+  let htmlFile = file;
+  if (source) {
+    htmlFile = regenerate ? (await ensurePlanHtml(source)).htmlPath : htmlPathFor(source);
+  }
+  await assertHtmlFile(htmlFile);
+  const real = await canonicalFile(htmlFile);
+  const out = { real, key: sessionKey(real), display: source ?? file };
+  if (source) out.source = await canonicalFile(source);
+  return out;
 }
 
 async function cmdOpen(file, flags, io) {
-  const { real } = await fileContext(file);
+  const ctx = await fileContext(file, { regenerate: true });
+  file = ctx.display;
   const baseUrl = await ensureServer(io.env);
-  const res = await api(baseUrl, "POST", "/api/sessions", { body: { file: real, reopen: Boolean(flags["--reopen"]) } });
+  const body = { file: ctx.real, reopen: Boolean(flags["--reopen"]) };
+  if (ctx.source) body.source_file = ctx.source;
+  const res = await api(baseUrl, "POST", "/api/sessions", { body });
   if (res.status !== 200) throw httpError(res, file);
   const { status, url } = res.body;
   if (status === "user-ended") return createUserEndedOutput({ file });
@@ -296,7 +311,9 @@ async function cmdOpen(file, flags, io) {
 }
 
 async function cmdPoll(file, flags, io) {
-  const { real } = await fileContext(file);
+  const ctx = await fileContext(file, { regenerate: true });
+  const { real } = ctx;
+  file = ctx.display;
   const reply = await agentReplyOf(flags);
   const body = { file: real };
   if (reply !== undefined) body.agent_reply = reply;
@@ -333,7 +350,9 @@ async function cmdPoll(file, flags, io) {
 }
 
 async function cmdReply(file, flags, io) {
-  const { key } = await fileContext(file);
+  const ctx = await fileContext(file);
+  const { key } = ctx;
+  file = ctx.display;
   const text = await agentReplyOf(flags);
   if (text === undefined) {
     throw new CliError("VALIDATION_ERROR", "reply needs --agent-reply or --agent-reply-file", 'Run `see-plan reply <file> --agent-reply "<text>"`.');
@@ -345,7 +364,9 @@ async function cmdReply(file, flags, io) {
 }
 
 async function cmdEnd(file, io) {
-  const { key } = await fileContext(file);
+  const ctx = await fileContext(file);
+  const { key } = ctx;
+  file = ctx.display;
   const baseUrl = await ensureServer(io.env);
   const res = await api(baseUrl, "POST", `/api/${key}/end`, { body: {}, timeoutMs: 10000 });
   if (res.status !== 200) throw httpError(res, file);
@@ -435,7 +456,7 @@ export async function run(argv, io = { stdout: process.stdout, stderr: process.s
     if (flags["--help"] || flags["-h"] || first === undefined) {
       result = flags["--help"] || flags["-h"] ? { usage: HOME_USAGE, next_step: "Run one of the commands above." } : await cmdHome(io);
     } else if (first === "open") result = await cmdOpen(second, flags, io);
-    else if (/\.html?$/i.test(first)) result = await cmdOpen(first, flags, io);
+    else if (/\.(html?|md|markdown)$/i.test(first)) result = await cmdOpen(first, flags, io);
     else if (first === "poll") result = await cmdPoll(second, flags, io);
     else if (first === "reply") result = await cmdReply(second, flags, io);
     else if (first === "end") result = await cmdEnd(second, io);

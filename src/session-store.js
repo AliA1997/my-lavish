@@ -30,6 +30,12 @@ function cleanPrompt(p) {
   return out;
 }
 
+// Leaves the ended state; undelivered prompts keep the session in "feedback".
+function reopen_(s) {
+  s.status = s.prompts.length ? "feedback" : "open";
+  delete s.ended_by;
+}
+
 export class SessionStore {
   #file;
   #dir;
@@ -94,10 +100,7 @@ export class SessionStore {
       }
       existing.url = `${baseUrl}/session/${key}`;
       if (source_file !== undefined) existing.source_file = source_file;
-      if (existing.status === "ended") {
-        existing.status = existing.prompts.length ? "feedback" : "open";
-        delete existing.ended_by;
-      }
+      if (existing.status === "ended") reopen_(existing);
       existing.updated_at = now();
       return [{ status: "resumed", session: existing }, true];
     });
@@ -183,6 +186,18 @@ export class SessionStore {
       const s = this.#need(state, key);
       s.status = "ended";
       s.ended_by = endedBy;
+      s.updated_at = now();
+      return [s, true];
+    });
+  }
+
+  startNewSession(key) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      if (s.status !== "ended") throw new StoreError("NOT_ENDED", "session is not ended");
+      reopen_(s);
+      s.chat = [];
+      delete s.claude_session_id;
       s.updated_at = now();
       return [s, true];
     });

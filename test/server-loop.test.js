@@ -479,3 +479,25 @@ test("restarted server re-watches existing sessions on websocket connect", async
   await fs.promises.writeFile(file, "<html><body>changed</body></html>");
   await waitFor((m) => m.type === "reload", 3000);
 });
+
+test("new-session requires same origin", async (t) => {
+  const { key, postJson } = await setup(t);
+  const res = await postJson(`/api/${key}/new-session`, {});
+  assert.equal(res.status, 403);
+  assert.equal((await res.json()).error.code, "FORBIDDEN_ORIGIN");
+});
+
+test("new-session restarts an ended session", async (t) => {
+  const { key, port, baseUrl, postJson } = await setup(t);
+  await postJson(`/api/${key}/end`, {}, { Origin: baseUrl });
+  const { ws, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  const res = await postJson(`/api/${key}/new-session`, {}, { Origin: baseUrl });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).status, "open");
+  await waitFor((m) => m.type === "new-session");
+  const page = await (await fetch(`${baseUrl}/session/${key}`)).text();
+  assert.ok(!page.includes('"status":"ended"'));
+  const again = await postJson(`/api/${key}/new-session`, {}, { Origin: baseUrl });
+  assert.equal(again.status, 409);
+});

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createServer } from "../src/server.js";
 import { SessionStore } from "../src/session-store.js";
+import { createChromeHtml } from "../src/chrome-page.js";
 
 async function setup(t) {
   const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-pub-"));
@@ -51,4 +52,11 @@ test("chrome-client.js checks the sender and assigns prompt ids", async (t) => {
   const source = await fetchAsset(baseUrl, "chrome-client.js");
   assert.ok(source.includes("event.source"), "chrome-client.js checks event.source");
   assert.ok(source.includes("randomUUID"), "chrome-client.js assigns prompt_id with randomUUID");
+});
+
+test("new session button is on the page and wired in the client", async (t) => {
+  const { baseUrl } = await setup(t);
+  const html = createChromeHtml({ key: "k", file: "f.html", status: "ended", chat: [], revision: 0 }, { baseUrl });
+  assert.ok(html.includes('id="newSession"'));
+  assert.ok((await fetchAsset(baseUrl, "chrome-client.js")).includes("/new-session"));
 });

@@ -14,7 +14,7 @@ import { isMarkdownPath } from "./plan-markdown.js";
 const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const PING_INTERVAL_MS = 30000;
-const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409 };
+const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409 };
 
 function hostnameOf(hostHeader) {
   if (!hostHeader) return "";
@@ -279,6 +279,25 @@ export function createServer({
       events.emit("ended", key);
       broadcast(key, { type: "ended", ended_by: endedBy });
       res.json({ ok: true, ended_by: endedBy });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/new-session", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "New sessions must be started from the session page"));
+      }
+      const { key } = req.params;
+      let session;
+      try {
+        session = await store.startNewSession(key);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      broadcast(key, { type: "new-session" });
+      res.json({ ok: true, status: session.status });
     } catch (e) {
       next(e);
     }

@@ -144,3 +144,38 @@ test("source_file must match the html", async () => {
   assert.equal(session.source_file, path.join(dir, "a.md"));
   await fs.promises.rm(dir, { recursive: true, force: true });
 });
+
+async function endedStore(t) {
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-store-"));
+  t.after(() => fs.promises.rm(dir, { recursive: true, force: true }));
+  const store = new SessionStore(dir);
+  const file = path.join(dir, "a.html");
+  const { session } = await store.upsertSession(file, "http://x");
+  return { store, key: session.key };
+}
+
+test("new session clears chat and reopens", async (t) => {
+  const { store, key } = await endedStore(t);
+  await store.appendAgentReply(key, "hello");
+  await store.endSession(key, "user");
+  const s = await store.startNewSession(key);
+  assert.equal(s.status, "open");
+  assert.equal(s.chat.length, 0);
+  assert.equal("ended_by" in s, false);
+});
+
+test("new session keeps queued prompts", async (t) => {
+  const { store, key } = await endedStore(t);
+  await store.queuePrompts(key, { prompts: [{ prompt_id: "p1", prompt: "x", tag: "h1", selector: "#a", text: "" }], end: true });
+  const s = await store.startNewSession(key);
+  assert.equal(s.status, "feedback");
+  assert.equal(s.prompts.length, 1);
+  const taken = await store.takeFeedback(key);
+  assert.equal(taken.status, "feedback");
+  assert.equal(taken.prompts.length, 1);
+});
+
+test("new session on an open session is NOT_ENDED", async (t) => {
+  const { store, key } = await endedStore(t);
+  await assert.rejects(store.startNewSession(key), { code: "NOT_ENDED" });
+});

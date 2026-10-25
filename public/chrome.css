@@ -366,3 +366,24 @@ body.ended #sendHint {
 #endedBanner[hidden] {
   display: none;
 }
+
+#newSession {
+  margin-left: 8px;
+  padding: 2px 10px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--error, #b3261e);
+  background: #fff;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#newSession[hidden] {
+  display: none;
+}
+
+#newSession:disabled {
+  opacity: 0.6;
+  cursor: default;
+}

@@ -25,6 +25,7 @@
   var presenceBanner = document.getElementById("presenceBanner");
   var sendHint = document.getElementById("sendHint");
   var endedBanner = document.getElementById("endedBanner");
+  var newSessionButton = document.getElementById("newSession");
 
   var queue = loadQueue();
   var ended = false;
@@ -174,6 +175,7 @@
     presenceBanner.hidden = true;
     showHint("", false);
     endedBanner.hidden = false;
+    newSessionButton.hidden = false;
     setFrameMode(false);
     postToFrame({ type: "ended" });
     renderControls();
@@ -379,6 +381,29 @@
       });
   }
 
+  function startNewSession() {
+    newSessionButton.disabled = true;
+    fetch("/api/" + encodeURIComponent(key) + "/new-session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    })
+      .then(function (res) {
+        return readJson(res).then(function (body) {
+          if (res.ok) {
+            window.location.reload();
+          } else {
+            newSessionButton.disabled = false;
+            showHint(errorMessage(body, res.status), true);
+          }
+        });
+      })
+      .catch(function (e) {
+        newSessionButton.disabled = false;
+        showHint("Could not reach see-plan: " + (e && e.message ? e.message : e), true);
+      });
+  }
+
   // ---- live events ---------------------------------------------------------
 
   function onServerEvent(msg) {
@@ -395,6 +420,8 @@
       frame.src = "/artifact/" + encodeURIComponent(key) + "/index.html?rev=" + encodeURIComponent(String(msg.revision));
     } else if (msg.type === "ended") {
       setEnded();
+    } else if (msg.type === "new-session") {
+      window.location.reload();
     }
   }
 
@@ -444,6 +471,7 @@
   sendButton.addEventListener("click", function () { send(false); });
   sendAndEndButton.addEventListener("click", function () { send(true); });
   endButton.addEventListener("click", endSession);
+  newSessionButton.addEventListener("click", startNewSession);
   annotateButton.addEventListener("click", toggleAnnotate);
   document.addEventListener("keydown", function (event) {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey

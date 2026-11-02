@@ -5,7 +5,8 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { createPollOutput, pollingAgent, run } from "../src/cli.js";
+import { BOOL_FLAGS, createOpenOutput, createPollOutput, pollingAgent, run, VALUE_FLAGS } from "../src/cli.js";
+import { HOME_USAGE } from "../src/guidance.js";
 
 function fakeIo(env = {}) {
   const out = [];
@@ -332,4 +333,54 @@ test("logs prints the Claude log page; bare see-plan opens it only from a termin
   human.io.stdout.isTTY = true;
   assert.equal(await run(["--json"], human.io), 0);
   assert.equal(JSON.parse(human.stdout()).claude_logs, logs.url);
+});
+
+test("poll defaults to 110000 ms under Claude Code; explicit --timeout-ms wins", async (t) => {
+  const { dir, file } = await tmpHtml(t);
+  const bodies = [];
+  const port = await fakeServer(t, (req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi" }));
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString() || "{}"));
+      res.end(JSON.stringify({ status: "waiting", reconnect: true }));
+    });
+  });
+  const base = { MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) };
+  assert.equal(await run(["poll", file, "--json"], fakeIo({ ...base, CLAUDECODE: "1" }).io), 0);
+  assert.equal(bodies[0].timeoutMs, 110000);
+  assert.equal(await run(["poll", file, "--json"], fakeIo(base).io), 0);
+  assert.equal("timeoutMs" in bodies[1], false, "humans keep the unlimited poll");
+  assert.equal(await run(["poll", file, "--json", "--timeout-ms", "30000"], fakeIo({ ...base, CLAUDECODE: "1" }).io), 0);
+  assert.equal(bodies[2].timeoutMs, 30000);
+  assert.equal(await run(["poll", file, "--json", "--agent"], fakeIo(base).io), 0);
+  assert.equal(bodies[3].agent, "agent");
+  assert.equal(bodies[3].timeoutMs, 110000);
+});
+
+test("waiting next_step is a routine reconnect", () => {
+  const out = createPollOutput({ file: "f.html", response: { status: "waiting", reconnect: true } });
+  assert.equal(out.session.reconnect, true);
+  assert.ok(out.next_step.includes("`see-plan poll f.html`"));
+  assert.match(out.next_step, /run `see-plan poll f\.html` again now/i);
+  assert.match(out.next_step, /do not reply to the user/i);
+  assert.doesNotMatch(out.next_step, /--timeout-ms/);
+  assert.ok(Buffer.byteLength(JSON.stringify(out)) < 300);
+});
+
+test("open next_step explains the cycle", () => {
+  const out = createOpenOutput({ file: "f.html", url: "u", status: "opened", knowsOwnSession: true });
+  assert.match(out.next_step, /1:50/);
+  assert.match(out.next_step, /run it again each time/);
+  assert.doesNotMatch(out.next_step, /--claude-session/);
+  assert.match(createOpenOutput({ file: "f.html", url: "u", status: "opened" }).next_step, /--claude-session/);
+});
+
+test("HOME_USAGE lists every flag", () => {
+  for (const flag of [...VALUE_FLAGS, ...BOOL_FLAGS]) {
+    if (flag === "-h") continue;
+    assert.ok(HOME_USAGE.includes(flag), flag);
+  }
 });

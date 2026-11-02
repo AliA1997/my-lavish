@@ -19,7 +19,7 @@ async function setup(t, opts = {}) {
   const file = path.join(art, "a.html");
   await fs.promises.writeFile(file, "<html><body><h1 id=t>hi</h1></body></html>");
   await fs.promises.writeFile(path.join(art, "style.css"), "h1{color:red}");
-  const srv = createServer({ store: new SessionStore(stateDir), stateDir, port: 0, version: "0.1.0", ...opts });
+  const srv = createServer({ store: new SessionStore(stateDir), stateDir, port: 0, version: "0.1.0", presenceGraceMs: 0, ...opts });
   const { port, baseUrl } = await srv.listen();
   t.after(async () => {
     await srv.close();
@@ -542,7 +542,7 @@ test("connect-claude names the md for markdown sessions", async (t) => {
   assert.equal(fake.calls[0].file, await fs.promises.realpath(md));
 });
 
-test("second connect within 60s is refused", async (t) => {
+test("second connect within 60s is refused for the same session only", async (t) => {
   const fake = fakeLauncher();
   const { art, key, postJson } = await setup(t, { launchClaude: fake.launchClaude });
   const other = path.join(art, "b.html");
@@ -554,9 +554,8 @@ test("second connect within 60s is refused", async (t) => {
   ]);
   assert.deepEqual([first.status, same.status].sort(), [200, 409]);
   const diff = await postJson(`/api/${otherKey}/connect-claude`, {});
-  assert.equal(diff.status, 409);
-  assert.equal((await diff.json()).error.code, "CONNECT_PENDING");
-  assert.equal(fake.calls.length, 1);
+  assert.equal(diff.status, 200, "launch cooldown is per session");
+  assert.equal(fake.calls.length, 2);
 });
 
 test("connect-claude refuses while a poll listens", async (t) => {
@@ -696,7 +695,7 @@ test("presence names a Claude agent and shows it working after it takes feedback
   const { ws, waitFor, messages } = await connectWs(port, key);
   t.after(() => ws.terminate());
   assert.deepEqual(await waitFor((m) => m.type === "presence"), {
-    type: "presence", listening: false, agent: null, session_id: null, working: false,
+    type: "presence", listening: false, agent: null, session_id: null, working: false, cycling: false, last_poll_at: null,
   });
   const pending = postJson("/api/poll", { file, agent: "claude", claude_session_id: CLAUDE_ID });
   const listening = await waitFor((m) => m.type === "presence" && m.listening === true);
@@ -848,4 +847,66 @@ test("the error log keeps existing records and is never overwritten when it is n
   assert.equal(res.status, 409);
   assert.equal((await res.json()).error.code, "ERROR_LOG_UNREADABLE");
   assert.equal(await fs.promises.readFile(errorLogFile, "utf8"), "{ not json");
+});
+
+
+test("agent polls are capped at agentPollMs; non-agent polls are not", async (t) => {
+  const { file, postJson } = await setup(t, { agentPollMs: 150 });
+  const started = Date.now();
+  const j = await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  assert.deepEqual(j, { status: "waiting", reconnect: true });
+  assert.ok(Date.now() - started < 2000);
+  const big = await (await postJson("/api/poll", { file, agent: "claude", timeoutMs: 60000 })).json();
+  assert.equal(big.reconnect, true);
+  const ac = new AbortController();
+  const human = postJson("/api/poll", { file }, {}).catch(() => "aborted");
+  const raced = await Promise.race([human.then(() => "returned"), delay(500).then(() => "still waiting")]);
+  assert.equal(raced, "still waiting");
+  void ac;
+});
+
+test("a reconnect cycle is invisible to the user", async (t) => {
+  const { key, file, port, postJson } = await setup(t, { agentPollMs: 100, presenceGraceMs: 2000 });
+  const first = postJson("/api/poll", { file, agent: "claude" });
+  const { ws, messages, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  await waitFor((m) => m.type === "presence" && m.listening === true);
+  await first;
+  for (let i = 0; i < 2; i++) await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  await delay(100);
+  const all = messages.filter((m) => m.type === "presence");
+  const presences = all.slice(all.findIndex((m) => m.listening === true));
+  assert.ok(presences.length >= 1);
+  assert.ok(presences.every((m) => m.listening === true), JSON.stringify(presences));
+});
+
+test("after the grace period presence says not listening", async (t) => {
+  const { key, file, port, postJson } = await setup(t, { agentPollMs: 50, presenceGraceMs: 200 });
+  const { ws, messages, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  await waitFor((m) => m.type === "presence");
+  const from = messages.length;
+  await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  const off = await waitFor((m) => m.type === "presence" && m.listening === false, 3000, from);
+  assert.ok(off.last_poll_at);
+});
+
+test("a note sent during the gap reaches the next poll; connect is refused while reconnecting", async (t) => {
+  const fake = fakeLauncher();
+  const { key, file, postJson, postPrompts } = await setup(t, { agentPollMs: 50, presenceGraceMs: 5000, launchClaude: fake.launchClaude });
+  await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  const sent = await (await postPrompts(key, { prompts: [note("in the gap")] })).json();
+  assert.equal(sent.delivered, "queued-for-agent");
+  const connect = await postJson(`/api/${key}/connect-claude`, {});
+  assert.equal(connect.status, 409);
+  assert.equal((await connect.json()).error.code, "AGENT_RECONNECTING");
+  assert.equal(fake.calls.length, 0);
+  const j = await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  assert.equal(j.status, "feedback");
+  assert.equal(j.prompts[0].prompt, "in the gap");
+});
+
+test("notes sent with no agent around are only queued", async (t) => {
+  const { key, postPrompts } = await setup(t);
+  assert.equal((await (await postPrompts(key, { prompts: [note("x")] })).json()).delivered, "queued");
 });

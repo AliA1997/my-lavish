@@ -52,19 +52,21 @@ export function shellQuote(p) {
 }
 
 const POLL_CMD = (file) => `${CMD} poll ${shellQuote(file)}`;
+/** Agent polls end on their own after this long (under Claude Code's default 120 s Bash timeout). */
+export const AGENT_POLL_MS = 110000;
 
-export function createOpenOutput({ file, url, status, claudeSessionId }) {
+export function createOpenOutput({ file, url, status, claudeSessionId, knowsOwnSession = false }) {
   const session = { file, url, status };
   if (claudeSessionId) session.claude_session_id = claudeSessionId;
   return {
     session,
     next_step: claudeSessionId
-      ? "Claude was started in a PowerShell window and will poll this session; do not poll from here."
+      ? "Claude was started in a new terminal window and will poll this session; do not poll from here."
       :
-      `Do not respond to the user yet. Run \`${POLL_CMD(file)}\` now and leave it running; ` +
-      "it stays silent until the user sends feedback or ends the session. " +
-      `After applying feedback, run \`${POLL_CMD(file)} --agent-reply "<short summary>"\`. ` +
-      "If you know your Claude session id, pass `--claude-session <id>` so the user can follow your log.",
+      `Do not respond to the user yet. Run \`${POLL_CMD(file)}\` now. ` +
+      "It stays silent until the user sends feedback, and returns about every 1:50 with `reconnect: true` so your Bash timeout never kills it: run it again each time. " +
+      `After applying feedback, run \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.` +
+      (knowsOwnSession ? "" : " If you know your Claude session id, pass `--claude-session <id>` so the user can follow your log."),
   };
 }
 
@@ -109,7 +111,10 @@ export function createPollOutput({ file, response, home = os.homedir() }) {
   } else if (status === "ended") {
     out.next_step = "The session is ended. Stop polling and do not reopen it unless the user asks.";
   } else if (status === "waiting") {
-    out.next_step = `No feedback yet. Re-run \`${POLL_CMD(file)}\` without --timeout-ms and leave it running.`;
+    if (response.reconnect) out.session.reconnect = true;
+    out.next_step = response.reconnect
+      ? `Routine reconnect (every 1:50, so your Bash timeout never kills the poll). Run \`${POLL_CMD(file)}\` again now. Do not reply to the user.`
+      : `No feedback yet. Run \`${POLL_CMD(file)}\` again now. Do not reply to the user.`;
   } else {
     out.next_step = `Unexpected status "${status}". Re-run \`${POLL_CMD(file)}\`.`;
   }
@@ -250,8 +255,8 @@ export async function ensureServer(env) {
 
 // ---------- argument parsing ----------
 
-const VALUE_FLAGS = new Set(["--agent-reply", "--agent-reply-file", "--timeout-ms", "--claude-session"]);
-const BOOL_FLAGS = new Set(["--json", "--no-open", "--reopen", "--with-claude", "--help", "-h", "--version"]);
+export const VALUE_FLAGS = new Set(["--agent-reply", "--agent-reply-file", "--timeout-ms", "--claude-session"]);
+export const BOOL_FLAGS = new Set(["--json", "--no-open", "--reopen", "--with-claude", "--agent", "--help", "-h", "--version"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -319,8 +324,8 @@ function claudeSessionOf(flags) {
 }
 
 /** Claude Code sets CLAUDECODE=1 and CLAUDE_CODE_SESSION_ID in the shells it runs; the panel shows who is polling. */
-export function pollingAgent(claudeSession, env) {
-  if (!claudeSession && env.CLAUDECODE !== "1") return {};
+export function pollingAgent(claudeSession, env, { agentFlag = false } = {}) {
+  if (!claudeSession && env.CLAUDECODE !== "1") return agentFlag ? { agent: "agent" } : {};
   const id = claudeSession ?? (isClaudeSessionId(env.CLAUDE_CODE_SESSION_ID) ? env.CLAUDE_CODE_SESSION_ID : undefined);
   return id ? { agent: "claude", claude_session_id: id } : { agent: "claude" };
 }
@@ -358,7 +363,7 @@ async function cmdOpen(file, flags, io) {
     if (connected.status !== 200) throw httpError(connected, file);
     claudeSessionId = connected.body.claude_session_id;
   }
-  return createOpenOutput({ file, url, status: shown, claudeSessionId });
+  return createOpenOutput({ file, url, status: shown, claudeSessionId, knowsOwnSession: Boolean(claudeSession) || isClaudeSessionId(io.env.CLAUDE_CODE_SESSION_ID) });
 }
 
 async function cmdPoll(file, flags, io) {
@@ -367,7 +372,7 @@ async function cmdPoll(file, flags, io) {
   const { real } = ctx;
   file = ctx.display;
   const reply = await agentReplyOf(flags);
-  const body = { file: real, ...pollingAgent(claudeSession, io.env) };
+  const body = { file: real, ...pollingAgent(claudeSession, io.env, { agentFlag: Boolean(flags["--agent"]) }) };
   if (reply !== undefined) body.agent_reply = reply;
   if (flags["--timeout-ms"] !== undefined) {
     const n = Number(flags["--timeout-ms"]);
@@ -375,6 +380,8 @@ async function cmdPoll(file, flags, io) {
       throw new CliError("VALIDATION_ERROR", "--timeout-ms must be a non-negative number", "Pass milliseconds, or omit it.");
     }
     body.timeoutMs = n;
+  } else if (body.agent) {
+    body.timeoutMs = AGENT_POLL_MS; // the server caps agent polls too, for older CLIs
   }
   const baseUrl = await ensureServer(io.env);
   if (claudeSession) await attachClaudeSession(baseUrl, ctx.key, claudeSession, file);

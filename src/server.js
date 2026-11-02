@@ -22,6 +22,8 @@ const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const PING_INTERVAL_MS = 30000;
 const CONNECT_COOLDOWN_MS = 60000;
+export const AGENT_POLL_MS = 110000; // under Claude Code's default 120 s Bash timeout
+const PRESENCE_GRACE_MS = 20000; // a re-poll within this window is invisible to the user
 const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424 };
 const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409 };
 const LOG_ROLES = new Set(["user", "assistant"]);
@@ -89,6 +91,9 @@ export function createServer({
   launchClaude = realLaunchClaude,
   claudeDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"),
   errorLogFile = path.join(os.homedir(), "claude-errors", "error-log.json"),
+  agentPollMs = AGENT_POLL_MS,
+  presenceGraceMs = PRESENCE_GRACE_MS,
+  connectCooldownMs = CONNECT_COOLDOWN_MS,
 }) {
   const app = express();
   const events = new EventEmitter();
@@ -104,7 +109,10 @@ export function createServer({
   let idleTimer = null;
   const claudeLinks = new Map(); // key -> { claudeSessionId, transcriptPath }: keeps state.json off the log hot path
   const agents = new Map(); // key -> { agent, sessionId, working }: the last poller, for the panel's status line
-  let pendingLaunch = null; // { key, at }: one launch at a time across the whole server
+  const pendingLaunch = new Map(); // key -> launched-at ms: one launch at a time per session
+  const graces = new Map(); // key -> { until, timer }: a poll just ended; the user still sees "connected"
+  const lastPresence = new Map(); // key -> JSON of the last visible presence broadcast
+  const lastPollAt = new Map(); // key -> ISO time of the last poll that listened
   const transcripts = new Map(); // Claude session id -> transcript path, for the log page
 
   function track(promise) {
@@ -126,16 +134,53 @@ export function createServer({
     return session;
   }
 
+  function inGrace(key) {
+    const g = graces.get(key);
+    return Boolean(g && Date.now() < g.until);
+  }
+
+  function clearGrace(key) {
+    const g = graces.get(key);
+    if (g) clearTimeout(g.timer);
+    graces.delete(key);
+  }
+
   // `working`: the last poll took feedback and no poll has listened since.
+  // `cycling`: no poll listens right now, but one ended moments ago (a routine reconnect); the UI shows it as connected.
   function presence(key) {
     const a = agents.get(key);
+    const live = Boolean(activePolls.get(key)?.listening);
+    const cycling = !live && !a?.working && inGrace(key);
     return {
       type: "presence",
-      listening: Boolean(activePolls.get(key)?.listening),
+      listening: live || cycling,
       agent: a?.agent ?? null,
       session_id: a?.sessionId ?? null,
       working: Boolean(a?.working),
+      cycling,
+      last_poll_at: lastPollAt.get(key) ?? null,
     };
+  }
+
+  /** Broadcasts presence only when what the user sees changed (cycling and last_poll_at are not visible). */
+  function broadcastPresence(key, { force = false } = {}) {
+    const p = presence(key);
+    const visible = JSON.stringify([p.listening, p.agent, p.session_id, p.working]);
+    if (!force && lastPresence.get(key) === visible) return;
+    lastPresence.set(key, visible);
+    broadcast(key, p);
+  }
+
+  function startGrace(key) {
+    clearGrace(key);
+    if (!(presenceGraceMs > 0) || closing) return false;
+    const timer = setTimeout(() => {
+      graces.delete(key);
+      if (!activePolls.get(key)?.listening) broadcastPresence(key);
+    }, presenceGraceMs);
+    timer.unref();
+    graces.set(key, { until: Date.now() + presenceGraceMs, timer });
+    return true;
   }
 
   async function linkClaudeSession(key, id) {
@@ -282,14 +327,17 @@ export function createServer({
       } catch (e) {
         return sendStoreError(res, e);
       }
+      const agentNear = Boolean(activePolls.get(key)?.listening) || inGrace(key);
       if (accepted > 0) events.emit("feedback", key);
       const session = await broadcastChat(key);
       if (end) {
         agents.delete(key);
+      lastPresence.delete(key);
+        clearGrace(key);
         events.emit("ended", key);
         broadcast(key, { type: "ended", ended_by: "user" });
       }
-      res.json({ accepted, chat: serializeChat(session?.chat ?? []) });
+      res.json({ accepted, delivered: agentNear ? "queued-for-agent" : "queued", chat: serializeChat(session?.chat ?? []) });
     } catch (e) {
       next(e);
     }
@@ -325,6 +373,8 @@ export function createServer({
         return sendStoreError(res, e);
       }
       agents.delete(key);
+      lastPresence.delete(key);
+      clearGrace(key);
       events.emit("ended", key);
       broadcast(key, { type: "ended", ended_by: endedBy });
       res.json({ ok: true, ended_by: endedBy });
@@ -347,6 +397,7 @@ export function createServer({
       }
       claudeLinks.delete(key);
       agents.delete(key);
+      lastPresence.delete(key);
       broadcast(key, { type: "new-session" });
       res.json({ ok: true, status: session.status });
     } catch (e) {
@@ -367,12 +418,16 @@ export function createServer({
       if (activePolls.get(key)?.listening) {
         return res.status(409).json(errorBody("LISTENER_ACTIVE", "An agent is already polling this session"));
       }
-      if (pendingLaunch && Date.now() - pendingLaunch.at < CONNECT_COOLDOWN_MS) {
+      if (inGrace(key)) {
+        return res.status(409).json(errorBody("AGENT_RECONNECTING", "The agent is reconnecting; it is still connected"));
+      }
+      const launchedAt = pendingLaunch.get(key);
+      if (launchedAt !== undefined && Date.now() - launchedAt < connectCooldownMs) {
         return res.status(409).json(errorBody("CONNECT_PENDING", "A Claude window was just started; wait for it to begin polling"));
       }
       const sessionId = crypto.randomUUID();
-      const launch = { key, at: Date.now() };
-      pendingLaunch = launch; // set before any await so a double click cannot start two windows
+      const launch = Date.now();
+      pendingLaunch.set(key, launch); // set before any await so a double click cannot start two windows
       try {
         await launchClaude({
           file: session.source_file ?? session.file,
@@ -380,7 +435,7 @@ export function createServer({
           sessionId,
         });
       } catch (e) {
-        if (pendingLaunch === launch) pendingLaunch = null;
+        if (pendingLaunch.get(key) === launch) pendingLaunch.delete(key);
         const status = LAUNCH_ERROR_STATUS[e?.code];
         if (!status) throw e;
         return res.status(status).json(errorBody(e.code, e.message));
@@ -618,6 +673,9 @@ export function createServer({
     const onEvent = (k) => {
       if (k === key) notify();
     };
+    const isAgent = agent === "claude" || agent === "agent" || agent === true;
+    // Agent polls end every agentPollMs so a Bash tool timeout never kills them; the agent just re-polls.
+    const effectiveTimeout = isAgent && agentPollMs > 0 ? Math.min(timeoutMs || Infinity, agentPollMs) : timeoutMs;
     poll = {
       key,
       listening: false,
@@ -633,9 +691,13 @@ export function createServer({
         events.off("ended", onEvent);
         clearTimeout(timer);
         if (activePolls.get(key) === poll) activePolls.delete(key);
-        if (poll.listening || poll.delivered) {
-          poll.listening = false;
-          broadcast(key, presence(key));
+        const wasListening = poll.listening;
+        poll.listening = false;
+        if (poll.delivered) {
+          clearGrace(key);
+          broadcastPresence(key);
+        } else if (wasListening && !startGrace(key)) {
+          broadcastPresence(key);
         }
         notify();
         updateIdle();
@@ -661,14 +723,16 @@ export function createServer({
       while (result.status === "waiting" && !timedOut && !vanished && !closing) {
         if (!poll.listening) {
           poll.listening = true;
-          if (pendingLaunch?.key === key) pendingLaunch = null;
+          clearGrace(key);
+          lastPollAt.set(key, new Date().toISOString());
+          pendingLaunch.delete(key);
           agents.set(key, { agent: poll.agent, sessionId: poll.sessionId, working: false });
-          broadcast(key, presence(key));
-          if (timeoutMs > 0) {
+          broadcastPresence(key);
+          if (effectiveTimeout > 0) {
             timer = setTimeout(() => {
               timedOut = true;
               notify();
-            }, timeoutMs);
+            }, Math.min(effectiveTimeout, MAX_TIMER_MS));
             timer.unref();
           }
         }
@@ -684,6 +748,7 @@ export function createServer({
         restoreUnconfirmed();
         return;
       }
+      if (timedOut && result.status === "waiting" && isAgent) result = { status: "waiting", reconnect: true };
       if (result.status === "feedback" && !result.session_ended) {
         agents.set(key, { agent: poll.agent, sessionId: poll.sessionId, working: true });
         poll.delivered = true;
@@ -855,6 +920,8 @@ export function createServer({
     closing = (async () => {
       clearInterval(pingTimer);
       clearTimeout(idleTimer);
+      for (const g of graces.values()) clearTimeout(g.timer);
+      graces.clear();
       for (const poll of activePolls.values()) poll.notify();
       for (const set of sockets.values()) for (const ws of set) ws.terminate();
       wss.close();

@@ -74,12 +74,12 @@ export const PLAYBOOKS = [
 
 export const HOME_USAGE = [
   "see-plan <file.html|file.md>  open the plan in the browser (--with-claude also starts Claude in PowerShell)",
-  "see-plan poll <file>          wait for the human's feedback (--agent-reply, --agent-reply-file, --timeout-ms)",
+  "see-plan poll <file>          wait for the human's feedback; agent polls return about every 1:50, run again (--agent-reply, --agent-reply-file, --timeout-ms, --claude-session, --agent)",
   "see-plan reply <file>         post a chat reply without polling (--agent-reply)",
   "see-plan end <file>           end the session",
   "see-plan design               page design rules",
   "see-plan playbook [id]        page recipes: plan, diagram, table, comparison, input",
   "see-plan logs                 open the newest Claude session's log in the browser (bare see-plan in a terminal does too)",
   "see-plan stop                 stop the local server",
-  "flags: --json, --no-open, --reopen, --version, --help",
+  "flags: --json, --no-open, --reopen, --with-claude, --agent, --claude-session <id>, --timeout-ms <ms>, --agent-reply <text>, --agent-reply-file <file|->, --version, --help",
 ].join("\n");

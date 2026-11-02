@@ -122,6 +122,8 @@ Flags: `--json` (JSON instead of TOON text), `--no-open` (do not launch a browse
 
 Every output includes a `next_step` telling the agent what to do next.
 
+**Staying connected.** An agent's poll (inside Claude Code, or with `--agent`) returns on its own about every **1 min 50 s** with `status: waiting` and `reconnect: true`, which is under Claude Code's default 120 s Bash timeout, so the tool never kills it. The agent simply runs the same poll again. The server also caps agent polls at 1:50 for older CLIs. The panel keeps showing "connected" through these cycles: presence stays connected for a 20 s grace period after each poll ends, notes sent in the gap are handed to the next poll, and Connect Claude is refused (`AGENT_RECONNECTING`) so a second Claude is never started.
+
 ## Working with Claude from the page
 
 - **Start new session** appears in the panel after a session ends. It keeps the same file, clears the chat, and keeps any feedback the agent has not collected yet.

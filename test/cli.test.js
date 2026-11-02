@@ -5,7 +5,7 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { createPollOutput, run } from "../src/cli.js";
+import { createPollOutput, pollingAgent, run } from "../src/cli.js";
 
 function fakeIo(env = {}) {
   const out = [];
@@ -258,4 +258,78 @@ test("poll --claude-session rejects a bad id", async (t) => {
   assert.equal(await run(["poll", file, "--claude-session", "nope", "--json"], a.io), 1);
   assert.equal(JSON.parse(a.stdout()).error.code, "VALIDATION_ERROR");
   assert.equal(requests, 0);
+});
+
+const logPrompt = { prompt: "Add this Claude log entry", tag: "claude-log", target: { entry: { text: "boom" } } };
+
+test("poll next_step tells the agent where claude-log entries go", () => {
+  const home = path.join("C:", "Users", "me");
+  const log = path.join(home, "claude-errors", "error-log.json");
+  const only = createPollOutput({ file: "f.html", home, response: { status: "feedback", prompts: [logPrompt] } });
+  assert.ok(only.next_step.includes(`\`${log}\``));
+  assert.match(only.next_step, /One prompt is tagged `claude-log`/);
+  assert.match(only.next_step, /`target\.entry`.*`reported_at`/);
+  assert.match(only.next_step, /Then poll again with `see-plan poll f\.html --agent-reply/);
+  assert.doesNotMatch(only.next_step, /Apply/);
+
+  const mixed = createPollOutput({ file: "f.html", home, response: { status: "feedback", prompts: [logPrompt, logPrompt, { prompt: "x", tag: "h1" }] } });
+  assert.match(mixed.next_step, /2 prompts are tagged/);
+  assert.match(mixed.next_step, /Apply the other prompts to the HTML file in place/);
+
+  const ended = createPollOutput({ file: "f.html", home, response: { status: "feedback", session_ended: true, prompts: [logPrompt] } });
+  assert.ok(ended.next_step.includes(log));
+  assert.match(ended.next_step, /Report what you did in chat, and do not poll again\.$/);
+});
+
+test("pollingAgent reports Claude Code and its session id", () => {
+  const id = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
+  const flagged = "2b4e28ba-2fa1-11d2-883f-0016d3cca427";
+  assert.deepEqual(pollingAgent(undefined, {}), {});
+  assert.deepEqual(pollingAgent(undefined, { CLAUDE_CODE_SESSION_ID: id }), {}, "needs CLAUDECODE=1");
+  assert.deepEqual(pollingAgent(undefined, { CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: id }), { agent: "claude", claude_session_id: id });
+  assert.deepEqual(pollingAgent(undefined, { CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: "../x" }), { agent: "claude" });
+  assert.deepEqual(pollingAgent(flagged, { CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: id }), { agent: "claude", claude_session_id: flagged });
+});
+
+test("poll sends the agent and its Claude session with the request", async (t) => {
+  const { dir, file } = await tmpHtml(t);
+  const id = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
+  const bodies = [];
+  const port = await fakeServer(t, (req, res) => {
+    res.setHeader("content-type", "application/json");
+    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi" }));
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      bodies.push({ url: req.url, body: JSON.parse(Buffer.concat(chunks).toString() || "{}") });
+      res.end(JSON.stringify({ status: "waiting" }));
+    });
+  });
+  const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port), CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: id });
+  assert.equal(await run(["poll", file, "--json"], a.io), 0);
+  assert.deepEqual(bodies.map((b) => b.url), ["/api/poll"], "no separate attach request");
+  assert.equal(bodies[0].body.agent, "claude");
+  assert.equal(bodies[0].body.claude_session_id, id);
+
+  const b = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
+  assert.equal(await run(["poll", file, "--json"], b.io), 0);
+  assert.equal("agent" in bodies[1].body, false);
+});
+
+test("logs prints the Claude log page; bare see-plan opens it only from a terminal", async (t) => {
+  const { env } = await mdEnv(t);
+  const l = fakeIo(env);
+  assert.equal(await run(["logs", "--json"], l.io), 0);
+  const { logs } = JSON.parse(l.stdout());
+  assert.deepEqual(logs, { url: `http://127.0.0.1:${env.MY_LAVISH_PORT}/claude`, status: "ready" });
+  assert.equal((await fetch(logs.url)).status, 200);
+
+  const agent = fakeIo(env);
+  assert.equal(await run(["--json"], agent.io), 0);
+  assert.equal(JSON.parse(agent.stdout()).claude_logs, undefined, "agents run without a TTY");
+
+  const human = fakeIo(env);
+  human.io.stdout.isTTY = true;
+  assert.equal(await run(["--json"], human.io), 0);
+  assert.equal(JSON.parse(human.stdout()).claude_logs, logs.url);
 });

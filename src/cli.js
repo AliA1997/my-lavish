@@ -77,7 +77,15 @@ export function createUserEndedOutput({ file }) {
   };
 }
 
-export function createPollOutput({ file, response }) {
+/** Prompts tagged claude-log are Claude log entries the user clicked in the panel. */
+function errorLogStep(count, home) {
+  const log = path.join(home, "claude-errors", "error-log.json");
+  return `${count === 1 ? "One prompt is" : `${count} prompts are`} tagged \`claude-log\`: Claude log entries the user flagged. ` +
+    `Append each one's \`target.entry\`, plus a \`reported_at\` ISO timestamp, to the JSON array in \`${log}\` ` +
+    "(create the folder, and the file as `[]`, if missing; keep the records already there). ";
+}
+
+export function createPollOutput({ file, response, home = os.homedir() }) {
   const markdown = isMarkdownPath(file);
   const status = response.status;
   const out = { session: { file, status } };
@@ -85,11 +93,19 @@ export function createPollOutput({ file, response }) {
   if (response.session_ended) out.session.session_ended = true;
   if (response.prompts) out.prompts = response.prompts;
   if (status === "feedback") {
+    const prompts = response.prompts ?? [];
+    const logged = prompts.filter((p) => p?.tag === "claude-log").length;
+    const logStep = logged ? errorLogStep(logged, home) : "";
+    const edits = prompts.length > logged;
+    const which = logged ? "the other prompts" : "each prompt";
+    const again = `poll again with \`${POLL_CMD(file)} --agent-reply "<short summary>"\``;
     out.next_step = response.session_ended
-      ? `The user ended the session with this feedback. Apply the changes to ${markdown ? `\`${file}\`` : "the HTML file"}, report what you did in chat, and do not poll again.`
-      : markdown
-        ? `Apply each prompt to \`${file}\` (the HTML is generated from it; \`selector\` refers to the rendered page), then poll again with \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.`
-        : `Apply each prompt to the HTML file in place (\`selector\` says where), then poll again with \`${POLL_CMD(file)} --agent-reply "<short summary>"\`.`;
+      ? `The user ended the session with this feedback. ${logStep}${edits ? `Apply the changes to ${markdown ? `\`${file}\`` : "the HTML file"}, report` : "Report"} what you did in chat, and do not poll again.`
+      : logStep + (!edits
+        ? `Then ${again}.`
+        : markdown
+          ? `Apply ${which} to \`${file}\` (the HTML is generated from it; \`selector\` refers to the rendered page), then ${again}.`
+          : `Apply ${which} to the HTML file in place (\`selector\` says where), then ${again}.`);
   } else if (status === "ended") {
     out.next_step = "The session is ended. Stop polling and do not reopen it unless the user asks.";
   } else if (status === "waiting") {
@@ -101,9 +117,10 @@ export function createPollOutput({ file, response }) {
   return out;
 }
 
-export function createHomeOutput({ sessions }) {
+export function createHomeOutput({ sessions, logsUrl }) {
   return {
     sessions: sessions.map(({ file, status, url }) => ({ file, status, url })),
+    ...(logsUrl ? { claude_logs: logsUrl } : {}),
     usage: HOME_USAGE,
     next_step: "Open an HTML artifact with `see-plan <file.html>`, or read `see-plan design` and `see-plan playbook` before writing one.",
   };
@@ -301,6 +318,13 @@ function claudeSessionOf(flags) {
   return id;
 }
 
+/** Claude Code sets CLAUDECODE=1 and CLAUDE_CODE_SESSION_ID in the shells it runs; the panel shows who is polling. */
+export function pollingAgent(claudeSession, env) {
+  if (!claudeSession && env.CLAUDECODE !== "1") return {};
+  const id = claudeSession ?? (isClaudeSessionId(env.CLAUDE_CODE_SESSION_ID) ? env.CLAUDE_CODE_SESSION_ID : undefined);
+  return id ? { agent: "claude", claude_session_id: id } : { agent: "claude" };
+}
+
 async function attachClaudeSession(baseUrl, key, id, file) {
   const res = await api(baseUrl, "POST", `/api/${key}/claude-session`, { body: { id }, timeoutMs: 10000 });
   if (res.status !== 200) throw httpError(res, file);
@@ -343,7 +367,7 @@ async function cmdPoll(file, flags, io) {
   const { real } = ctx;
   file = ctx.display;
   const reply = await agentReplyOf(flags);
-  const body = { file: real };
+  const body = { file: real, ...pollingAgent(claudeSession, io.env) };
   if (reply !== undefined) body.agent_reply = reply;
   if (flags["--timeout-ms"] !== undefined) {
     const n = Number(flags["--timeout-ms"]);
@@ -442,13 +466,47 @@ async function cmdServer(io) {
   return null;
 }
 
-async function cmdHome(io) {
+/** Starts the server if needed and opens the Claude log page; returns its url and whether a browser opened. */
+async function openLogsPage(flags, io) {
+  const url = `${await ensureServer(io.env)}/claude`;
+  if (flags["--no-open"] || io.env.MY_LAVISH_NO_OPEN === "1") return { url, opened: false };
+  try {
+    await (await import("open")).default(url);
+    return { url, opened: true };
+  } catch (e) {
+    io.stderr.write(`Could not open a browser: ${e.message}
+`);
+    return { url, opened: false };
+  }
+}
+
+async function cmdLogs(flags, io) {
+  const { url, opened } = await openLogsPage(flags, io);
+  return {
+    logs: { url, status: opened ? "opened" : "ready" },
+    next_step: opened
+      ? "The browser shows the newest Claude session's log; clicking an entry adds it to ~/claude-errors/error-log.json."
+      : `Open ${url} to see the newest Claude session's log.`,
+  };
+}
+
+async function cmdHome(flags, io) {
   const { stateDir } = configOf(io.env);
   let sessions = [];
   try {
     sessions = await new SessionStore(stateDir).listSessions();
   } catch {}
-  return createHomeOutput({ sessions });
+  // A person at a terminal (agents run without a TTY) also gets the Claude log page.
+  let logsUrl;
+  if (io.stdout.isTTY) {
+    try {
+      logsUrl = (await openLogsPage(flags, io)).url;
+    } catch (e) {
+      io.stderr.write(`Could not open the Claude log page: ${e.message}
+`);
+    }
+  }
+  return createHomeOutput({ sessions, logsUrl });
 }
 
 function cmdPlaybook(id) {
@@ -483,13 +541,14 @@ export async function run(argv, io = { stdout: process.stdout, stderr: process.s
     const [first, second] = positional;
     let result;
     if (flags["--help"] || flags["-h"] || first === undefined) {
-      result = flags["--help"] || flags["-h"] ? { usage: HOME_USAGE, next_step: "Run one of the commands above." } : await cmdHome(io);
+      result = flags["--help"] || flags["-h"] ? { usage: HOME_USAGE, next_step: "Run one of the commands above." } : await cmdHome(flags, io);
     } else if (first === "open") result = await cmdOpen(second, flags, io);
     else if (/\.(html?|md|markdown)$/i.test(first)) result = await cmdOpen(first, flags, io);
     else if (first === "poll") result = await cmdPoll(second, flags, io);
     else if (first === "reply") result = await cmdReply(second, flags, io);
     else if (first === "end") result = await cmdEnd(second, io);
     else if (first === "stop") result = await cmdStop(io);
+    else if (first === "logs") result = await cmdLogs(flags, io);
     else if (first === "server") result = await cmdServer(io);
     else if (first === "design") result = { design: DESIGN_TEXT, next_step: "Apply these rules, then check `see-plan playbook` for page recipes." };
     else if (first === "playbook") result = cmdPlaybook(second);

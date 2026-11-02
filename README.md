@@ -29,6 +29,26 @@ npm unlink -g my-lavish-axi; npm link   # puts `see-plan` on your PATH (the comm
 
 `npm link` now puts `see-plan` (not `my-lavish-axi`) on your PATH. Without it, run it directly: `node bin/see-plan.js <args>`.
 
+### Quick start
+
+```
+npm install
+npm test                                   # optional: unit tests
+node bin/see-plan.js examples/plan.html    # opens the page (or `see-plan ...` after npm link)
+node bin/see-plan.js poll examples/plan.html   # in a second terminal: waits for your feedback
+node bin/see-plan.js stop                  # when done
+```
+
+To see your Claude sessions, run `see-plan` with no file in a terminal (or `see-plan logs` from anywhere). The browser opens the **Claude log page** at `http://127.0.0.1:4388/claude`. No plan is shown. The top line is the newest Claude Code session's id and the date of its last prompt, and the page below is that session's log, updating live. **Recent sessions** switches to any of your 20 latest sessions. Click an entry to add it to `~/claude-errors/error-log.json`.
+
+To attach a session from the command line instead, pass its id (the file name of a `~/.claude/projects/<project>/<id>.jsonl`):
+
+```
+see-plan examples/plan.html --claude-session <session-uuid>
+```
+
+If the session was ended earlier, add `--reopen`. Use `--no-open` to skip the browser.
+
 ### Try it
 
 ```
@@ -86,18 +106,19 @@ One background server is started on demand and reused by later commands. A sessi
 
 | Command | What it does |
 | --- | --- |
-| `see-plan` | Lists known sessions and usage |
+| `see-plan` | Lists known sessions and usage. Run in a terminal, it also opens the Claude log page (agents, which run without a terminal, only get the text) |
 | `see-plan <file.html|file.md>` / `open <file>` | A `.md` plan is converted to a sibling `.html` (regenerated when the `.md` is newer, never over a hand-written `.html`); agents edit the `.md`. Opens (or reopens) the session and the browser. A session the user ended is refused unless `--reopen` is given |
 | `poll <file>` | Blocks until the user sends feedback or ends the session; prints prompts, `next_step`, and a DOM snapshot |
 | `poll <file> --agent-reply "<text>"` | Posts a reply to the chat, then polls |
 | `reply <file> --agent-reply "<text>"` | Posts a reply without polling |
 | `end <file>` | Ends the session |
+| `logs` | Opens the Claude log page (newest Claude session's log) in the browser; with `--no-open`, prints its URL |
 | `stop` | Stops the background server |
 | `design` | Prints the design rules for artifacts |
 | `playbook [id]` | Lists playbooks, or prints one (`plan`, `diagram`, `table`, `comparison`, `input`) |
 | `server` | Runs the server in the foreground (normally started automatically) |
 
-Flags: `--json` (JSON instead of TOON text), `--no-open` (do not launch a browser), `--reopen`, `--with-claude` (on open: also start Claude in a PowerShell window), `--claude-session <uuid>` (on open/poll: tell the panel which Claude session to show), `--agent-reply <text>`, `--agent-reply-file <path|->`, `--timeout-ms <n>` (poll returns `waiting` after this long), `--help`, `--version`.
+Flags: `--json` (JSON instead of TOON text), `--no-open` (do not launch a browser), `--reopen`, `--with-claude` (on open: also start Claude in a PowerShell window), `--claude-session <uuid>` (on open/poll: tell the panel which Claude session to show; inside Claude Code, poll fills it in on its own), `--agent-reply <text>`, `--agent-reply-file <path|->`, `--timeout-ms <n>` (poll returns `waiting` after this long), `--help`, `--version`.
 
 Every output includes a `next_step` telling the agent what to do next.
 
@@ -105,7 +126,11 @@ Every output includes a `next_step` telling the agent what to do next.
 
 - **Start new session** appears in the panel after a session ends. It keeps the same file, clears the chat, and keeps any feedback the agent has not collected yet.
 - **Connect Claude** (shown while no agent is polling) opens PowerShell, starts `claude --session-id <uuid>` in the plan's repo root, and tells it to run `see-plan poll`. `see-plan <file> --with-claude` does the same from the command line. Windows only; needs the native `claude.exe` on PATH. Permission prompts are Claude's own; see-plan never passes a permission-bypass flag.
-- **Claude log** tab shows that session's transcript (`~/.claude/projects/*/<session-id>.jsonl`, or `$CLAUDE_CONFIG_DIR`). An agent that is already running can attach itself with `--claude-session <uuid>`, or you can paste the id in the tab. Each refresh reads at most 256 KB and the tab keeps the last 500 entries.
+- **Agent status** at the top of the panel says when an agent is connected: "Claude agent connected — waiting for your feedback" while its poll waits, and "… is working on your feedback" after it takes your notes and before it polls again. `see-plan poll` recognizes Claude Code from the `CLAUDECODE` and `CLAUDE_CODE_SESSION_ID` variables Claude Code sets, so no flag is needed.
+- **Claude log** tab shows that session's transcript (`~/.claude/projects/*/<session-id>.jsonl`, or `$CLAUDE_CONFIG_DIR`). A Claude agent's poll attaches its own session when none is attached yet (it never replaces one you picked); `--claude-session <uuid>` always sets it. Each refresh reads at most 256 KB and the tab keeps the last 500 entries.
+- With no session attached, or one with no transcript (such as a Connect Claude launch that never started), the tab lists the **20 most recent Claude sessions**, newest first. Each is titled by its `/rename` title or first prompt; built-in commands such as `/clear` or `/model` are skipped. Click one to show its log, or paste an id. **Change session** reopens the list.
+- **Click a log entry** to send it to the agent as a `claude-log` note. The poll's `next_step` tells the agent to append the entry (session id, line `uuid`, part, role, kind, time, text) plus a `reported_at` time to the JSON array in `~/claude-errors/error-log.json`. A sent entry is marked, and clicking it again sends nothing. Select text inside an entry to copy it without sending.
+- **Claude log page** (`/claude`, opened by bare `see-plan` in a terminal or by `see-plan logs`): the newest Claude session's id and last-prompt date on top, its log below, and a **Recent sessions** menu for the other 19. The log loads at least 200 entries when the session has that many (reading up to 16 MB back), then updates live. Add `?id=<uuid>` to the URL to open a given session. No agent is involved here: clicking an entry makes the server append it (session id, line `uuid`, part, role, kind, time, text, `reported_at`) to `~/claude-errors/error-log.json` itself. It creates the file if missing, keeps the records already there, skips an entry that is already logged, and refuses to touch a file that is not a JSON array.
 - Every local process is trusted: the server has no token, so any process on this machine can attach a session id or trigger a launch. Do not run it on a shared machine.
 
 ## Environment variables

@@ -9,6 +9,8 @@
   var SNAPSHOT_TIMEOUT_MS = 5000;
   var RECONNECT_DELAYS_MS = [1000, 2000, 5000];
   var NOT_LISTENING = "Your agent is not listening. Ask it to run see-plan poll.";
+  var ERROR_LOG = "~/claude-errors/error-log.json";
+  var LOG_TAG = "claude-log";
 
   var boot = readBootstrap();
   var key = typeof boot.key === "string" ? boot.key : "";
@@ -22,6 +24,8 @@
   var sendAndEndButton = document.getElementById("sendAndEnd");
   var endButton = document.getElementById("endSession");
   var annotateButton = document.getElementById("annotateToggle");
+  var agentStatus = document.getElementById("agentStatus");
+  var agentStatusText = document.getElementById("agentStatusText");
   var presenceBanner = document.getElementById("presenceBanner");
   var presenceText = document.getElementById("presenceText");
   var connectButton = document.getElementById("connectClaude");
@@ -31,7 +35,11 @@
   var tabChat = document.getElementById("tabChat");
   var tabLog = document.getElementById("tabLog");
   var claudeLog = document.getElementById("claudeLog");
-  var claudeAttach = document.getElementById("claudeAttach");
+  var claudeHeader = document.getElementById("claudeHeader");
+  var claudeCurrent = document.getElementById("claudeCurrent");
+  var claudeChange = document.getElementById("claudeChange");
+  var claudePicker = document.getElementById("claudePicker");
+  var claudeSessions = document.getElementById("claudeSessions");
   var claudeInput = document.getElementById("claudeSessionInput");
   var claudeAttachButton = document.getElementById("claudeAttachButton");
   var claudeStatus = document.getElementById("claudeStatus");
@@ -53,6 +61,12 @@
   var logNext = null; // byte offset to continue from; null means the first (tail) request
   var logTimer = null;
   var logBusy = false;
+  var pickerOpen = false; // the recent-sessions list, opened over an attached session
+  var logMissing = false; // the attached session has no transcript (yet)
+  var sessionsBusy = false;
+  var sentLogRefs = {}; // prompt ids of log entries already in the chat
+  var agentListening = false;
+  var connecting = false;
   var shownRevision = (function () {
     var m = /[?&]rev=(\d+)/.exec(frame ? frame.getAttribute("src") || "" : "");
     return m ? Number(m[1]) : 0;
@@ -114,14 +128,17 @@
   function anchorLabel(prompt) {
     if (prompt.tag === "text") return "text selection";
     if (prompt.tag === "chat" || !prompt.tag) return "";
+    if (prompt.tag === LOG_TAG) return "Claude log entry";
     return prompt.tag + " " + (prompt.selector || "");
   }
 
   function renderChat(chat) {
     chatLog.textContent = "";
+    sentLogRefs = {};
     for (var i = 0; i < chat.length; i++) {
       var entry = chat[i];
       if (!entry || typeof entry !== "object") continue;
+      if (typeof entry.prompt_id === "string" && entry.prompt_id.indexOf(LOG_TAG + ":") === 0) sentLogRefs[entry.prompt_id] = true;
       var bubble;
       if (entry.role === "agent") {
         bubble = element("div", "bubble agent");
@@ -135,6 +152,7 @@
       chatLog.appendChild(bubble);
     }
     chatLog.scrollTop = chatLog.scrollHeight;
+    markSentRows();
   }
 
   function renderQueue() {
@@ -180,10 +198,29 @@
     annotateButton.textContent = annotate && !ended ? "Annotate: on" : "Annotate: off";
   }
 
-  function setPresence(listening) {
+  /** listening: a poll waits now. working: the last poll took feedback and has not polled again yet. */
+  function setPresence(msg) {
+    var listening = msg.listening === true;
+    var working = !listening && msg.working === true;
+    var who = msg.agent === "claude" ? "Claude agent" : "Agent";
+    agentListening = listening;
     presenceText.textContent = NOT_LISTENING;
-    if (listening === true) connectButton.disabled = false; // a later drop may need a new launch
-    presenceBanner.hidden = ended || listening !== false;
+    if (listening) connectButton.disabled = false; // a later drop may need a new launch
+    if (listening && connecting) {
+      connecting = false;
+      showHint("", false);
+    }
+    presenceBanner.hidden = ended || msg.listening !== false || working;
+    var text = listening ? who + " connected — waiting for your feedback" : who + " is working on your feedback";
+    if (typeof msg.session_id === "string" && msg.session_id) {
+      text += " · session " + msg.session_id.slice(0, 8);
+      agentStatus.title = "Claude session " + msg.session_id;
+    } else {
+      agentStatus.removeAttribute("title");
+    }
+    agentStatusText.textContent = text;
+    agentStatus.classList.toggle("working", working);
+    agentStatus.hidden = ended || !(listening || working);
   }
 
   function connectClaude() {
@@ -197,6 +234,7 @@
       .then(function (res) {
         return readJson(res).then(function (body) {
           if (res.ok) {
+            connecting = true;
             showHint("Claude is starting; this banner clears once it begins polling.", false);
           } else {
             connectButton.disabled = false;
@@ -215,6 +253,7 @@
     ended = true;
     document.body.classList.add("ended");
     presenceBanner.hidden = true;
+    agentStatus.hidden = true;
     showHint("", false);
     endedBanner.hidden = false;
     newSessionButton.hidden = false;
@@ -456,8 +495,12 @@
     else renderQueue();
     tabChat.setAttribute("aria-selected", showLog ? "false" : "true");
     tabLog.setAttribute("aria-selected", showLog ? "true" : "false");
-    if (showLog) refreshLog();
-    else clearTimeout(logTimer);
+    if (showLog) {
+      refreshLog();
+      if (!claudePicker.hidden) loadSessions();
+    } else {
+      clearTimeout(logTimer);
+    }
   }
 
   function waitingText() {
@@ -466,11 +509,88 @@
 
   function resetLog() {
     logNext = null;
+    logMissing = false;
     claudeEntries.textContent = "";
-    claudeAttach.hidden = Boolean(claudeSessionId);
     claudeStatus.textContent = claudeSessionId
       ? waitingText()
-      : "No Claude session is attached yet. Use Connect Claude, or paste a session id.";
+      : "No Claude session is attached yet. Pick a recent one, use Connect Claude, or paste a session id.";
+    renderPicker();
+  }
+
+  /** The list shows while no session is attached, while the attached one has no transcript, or on request. */
+  function renderPicker() {
+    var show = !claudeSessionId || pickerOpen || logMissing;
+    claudeHeader.hidden = !claudeSessionId;
+    claudeCurrent.textContent = claudeSessionId ? "Session " + claudeSessionId.slice(0, 8) : "";
+    claudeCurrent.title = claudeSessionId;
+    claudeChange.textContent = pickerOpen ? "Close list" : "Change session";
+    claudeChange.hidden = show && !pickerOpen; // the list is already up on its own
+    if (show && claudePicker.hidden && logVisible) loadSessions();
+    claudePicker.hidden = !show;
+  }
+
+  function timeAgo(iso) {
+    var t = Date.parse(iso);
+    if (!isFinite(t)) return "";
+    var min = Math.round((Date.now() - t) / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return min + " min ago";
+    if (min < 1440) return Math.round(min / 60) + " h ago";
+    if (min < 10080) return Math.round(min / 1440) + " d ago";
+    return new Date(t).toLocaleDateString();
+  }
+
+  function projectLabel(s) {
+    var parts = String(s.cwd || "").split(/[\\/]/).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : String(s.project || "");
+  }
+
+  function renderSessions(list) {
+    claudeSessions.textContent = "";
+    if (!list.length) {
+      claudeSessions.appendChild(element("p", "picker-empty", "No Claude sessions found in ~/.claude/projects."));
+      return;
+    }
+    list.forEach(function (s) {
+      if (!s || typeof s.id !== "string") return;
+      var item = element("button", "session-item" + (s.id === claudeSessionId ? " current" : ""));
+      item.type = "button";
+      item.title = s.id + (s.cwd ? "\n" + String(s.cwd) : "");
+      item.appendChild(element("span", "session-title", String(s.title || "(no prompt)")));
+      item.appendChild(element("span", "session-meta", [projectLabel(s), timeAgo(s.modified_at), s.id.slice(0, 8)].filter(Boolean).join(" \u00b7 ")));
+      item.addEventListener("click", function () { attachClaudeSession(s.id); });
+      claudeSessions.appendChild(item);
+    });
+  }
+
+  function loadSessions() {
+    if (sessionsBusy) return;
+    sessionsBusy = true;
+    if (!claudeSessions.childNodes.length) claudeSessions.appendChild(element("p", "picker-empty", "Loading\u2026"));
+    fetch("/api/claude-sessions")
+      .then(readJson)
+      .then(function (body) {
+        renderSessions(body && Array.isArray(body.sessions) ? body.sessions : []);
+      })
+      .catch(function () {
+        claudeSessions.textContent = "";
+        claudeSessions.appendChild(element("p", "picker-empty", "Could not load Claude sessions."));
+      })
+      .then(function () {
+        sessionsBusy = false;
+      });
+  }
+
+  /** The entry's prompt id: stable per transcript line, so a resend is a no-op and marks survive a reload. */
+  function logRef(entry) {
+    return typeof entry.uuid === "string" ? LOG_TAG + ":" + entry.uuid + ":" + (Number(entry.part) || 0) : "";
+  }
+
+  function markSentRows() {
+    var rows = claudeEntries.querySelectorAll(".log-entry[data-ref]");
+    for (var i = 0; i < rows.length; i++) {
+      if (sentLogRefs[rows[i].getAttribute("data-ref")]) rows[i].classList.add("sent");
+    }
   }
 
   function addLogEntry(entry) {
@@ -480,8 +600,86 @@
     var kind = entry.kind === "tool_use" ? " \u00b7 tool call" : entry.kind === "tool_result" ? " \u00b7 tool result" : "";
     row.appendChild(element("div", "log-label", who + kind));
     row.appendChild(element("div", "log-text", String(entry.text || ""))); // textContent only: tool output is untrusted
-    if (entry.at) row.title = String(entry.at);
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    row.title = (entry.at ? String(entry.at) + "\n" : "") + "Click to send this entry to the agent for " + ERROR_LOG;
+    var ref = logRef(entry);
+    if (ref) {
+      row.setAttribute("data-ref", ref);
+      if (sentLogRefs[ref]) row.classList.add("sent");
+    }
+    row.addEventListener("click", function () {
+      var selection = window.getSelection ? window.getSelection() : null;
+      if (selection && !selection.isCollapsed && row.contains(selection.anchorNode)) return; // copying text, not picking
+      sendLogEntry(entry, row);
+    });
+    row.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        sendLogEntry(entry, row);
+      }
+    });
     claudeEntries.appendChild(row);
+  }
+
+  /** Sends one log entry as a claude-log prompt; poll's next_step tells the agent to append it to ERROR_LOG. */
+  function sendLogEntry(entry, row) {
+    if (ended) {
+      showHint("Session ended \u2014 log entries are not sent.", true);
+      return;
+    }
+    if (row.classList.contains("sent")) {
+      showHint("That entry was already sent to the agent.", false);
+      return;
+    }
+    if (row.classList.contains("sending")) return;
+    row.classList.add("sending");
+    var delivered = agentListening; // read now: the poll answers, and drops presence, before this POST does
+    var prompt = {
+      prompt_id: logRef(entry) || newPromptId(),
+      prompt: "Add this Claude log entry to " + ERROR_LOG + ".",
+      tag: LOG_TAG,
+      selector: "",
+      text: "",
+      target: {
+        error_log: ERROR_LOG,
+        entry: {
+          claude_session_id: claudeSessionId,
+          uuid: typeof entry.uuid === "string" ? entry.uuid : null,
+          part: Number(entry.part) || 0,
+          role: String(entry.role || ""),
+          kind: String(entry.kind || ""),
+          at: entry.at ? String(entry.at) : null,
+          text: String(entry.text || ""),
+        },
+      },
+    };
+    fetch("/api/" + encodeURIComponent(key) + "/prompts", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompts: [prompt], dom_snapshot: "" }),
+    })
+      .then(function (res) {
+        return readJson(res).then(function (body) {
+          if (res.ok && body && Array.isArray(body.chat)) {
+            row.classList.add("sent");
+            renderChat(body.chat);
+            showHint(delivered
+              ? "Sent to the agent for " + ERROR_LOG + "."
+              : "Queued for the agent; it gets the entry when it polls.", false);
+          } else if (res.status === 409 && body && body.error && body.error.code === "ENDED") {
+            setEnded();
+          } else {
+            showHint(errorMessage(body, res.status), true);
+          }
+        });
+      })
+      .catch(function (e) {
+        showHint("Could not reach see-plan: " + (e && e.message ? e.message : e), true);
+      })
+      .then(function () {
+        row.classList.remove("sending");
+      });
   }
 
   function refreshLog() {
@@ -494,8 +692,12 @@
       .then(readJson)
       .then(function (body) {
         if (!body || !Array.isArray(body.entries)) return;
+        if (logMissing !== !body.found) {
+          logMissing = !body.found;
+          renderPicker();
+        }
         if (!body.found) {
-          claudeStatus.textContent = waitingText();
+          claudeStatus.textContent = waitingText() + " Or pick another session below.";
           return;
         }
         var first = logNext === null;
@@ -506,7 +708,7 @@
         body.entries.forEach(addLogEntry);
         while (claudeEntries.childNodes.length > MAX_LOG_ENTRIES) claudeEntries.removeChild(claudeEntries.firstChild);
         if (typeof body.next === "number") logNext = body.next;
-        if (body.entries.length) claudeLog.scrollTop = claudeLog.scrollHeight;
+        if (body.entries.length && !pickerOpen) claudeLog.scrollTop = claudeLog.scrollHeight;
       })
       .catch(function () {
         // transient: try again on the next tick
@@ -518,13 +720,16 @@
   }
 
   function onClaudeSession(id) {
+    if (id === claudeSessionId) { // e.g. our own attach echoed back over the WebSocket
+      renderPicker();
+      return;
+    }
     claudeSessionId = id;
     resetLog();
     if (logVisible) refreshLog();
   }
 
-  function attachClaudeSession() {
-    var id = claudeInput.value.trim();
+  function attachClaudeSession(id) {
     if (!id) return;
     claudeAttachButton.disabled = true;
     fetch("/api/" + encodeURIComponent(key) + "/claude-session", {
@@ -535,8 +740,9 @@
       .then(function (res) {
         return readJson(res).then(function (body) {
           if (res.ok) {
-            onClaudeSession(id);
             claudeInput.value = "";
+            pickerOpen = false;
+            onClaudeSession(id);
           } else {
             claudeStatus.textContent = errorMessage(body, res.status);
           }
@@ -558,7 +764,7 @@
       renderChat(msg.chat);
       pruneQueue(msg.chat);
     } else if (msg.type === "presence") {
-      setPresence(msg.listening);
+      setPresence(msg);
     } else if (msg.type === "reload" || (msg.type === "revision" && Number(msg.revision) !== shownRevision)) {
       // "revision" is sent on every (re)connect: it catches reloads missed while the socket was down.
       shownRevision = Number(msg.revision);
@@ -623,17 +829,23 @@
   connectButton.addEventListener("click", connectClaude);
   tabChat.addEventListener("click", function () { selectTab(false); });
   tabLog.addEventListener("click", function () { selectTab(true); });
-  claudeAttachButton.addEventListener("click", attachClaudeSession);
+  claudeAttachButton.addEventListener("click", function () { attachClaudeSession(claudeInput.value.trim()); });
   claudeInput.addEventListener("keydown", function (event) {
     if (event.key === "Enter") {
       event.preventDefault();
-      attachClaudeSession();
+      attachClaudeSession(claudeInput.value.trim());
     }
+  });
+  claudeChange.addEventListener("click", function () {
+    pickerOpen = !pickerOpen;
+    renderPicker();
+    claudeLog.scrollTop = pickerOpen ? 0 : claudeLog.scrollHeight;
   });
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) clearTimeout(logTimer);
     else if (logVisible) refreshLog();
   });
+  if (claudeSessionId) selectTab(true); // an attached session: show its input/output first
   annotateButton.addEventListener("click", toggleAnnotate);
   document.addEventListener("keydown", function (event) {
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey

@@ -79,6 +79,7 @@ export const HOME_USAGE = [
   "see-plan end <file>           end the session",
   "see-plan design               page design rules",
   "see-plan playbook [id]        page recipes: plan, diagram, table, comparison, input",
+  "see-plan logs                 open the newest Claude session's log in the browser (bare see-plan in a terminal does too)",
   "see-plan stop                 stop the local server",
   "flags: --json, --no-open, --reopen, --version, --help",
 ].join("\n");

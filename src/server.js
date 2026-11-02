@@ -10,10 +10,12 @@ import { watchArtifact } from "./artifact-watcher.js";
 import { assertHtmlFile, canonicalFile, resolveArtifactAsset } from "./artifact-path.js";
 import { injectSdk } from "./html-transform.js";
 import { createChromeHtml } from "./chrome-page.js";
+import { createLogsHtml } from "./logs-page.js";
+import { appendErrorLog, ErrorLogError, reportedRefs } from "./error-log.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
 import { isMarkdownPath } from "./plan-markdown.js";
-import { findTranscript, readTranscript } from "./claude-log.js";
+import { findLastPromptAt, findTranscript, listClaudeSessions, readTranscript } from "./claude-log.js";
 import { findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
@@ -22,6 +24,12 @@ const PING_INTERVAL_MS = 30000;
 const CONNECT_COOLDOWN_MS = 60000;
 const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424 };
 const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409 };
+const LOG_ROLES = new Set(["user", "assistant"]);
+const LOG_KINDS = new Set(["text", "tool_use", "tool_result"]);
+const MAX_LOG_TEXT = 20000;
+const PAGE_LOG_BYTES = 1024 * 1024; // the log page's first window; it doubles up to PAGE_MAX_BYTES...
+const PAGE_MAX_BYTES = 16 * 1024 * 1024;
+const PAGE_MIN_ENTRIES = 200; // ...until it holds this many entries (screenshots make some lines huge)
 
 function hostnameOf(hostHeader) {
   if (!hostHeader) return "";
@@ -80,6 +88,7 @@ export function createServer({
   log = () => {},
   launchClaude = realLaunchClaude,
   claudeDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"),
+  errorLogFile = path.join(os.homedir(), "claude-errors", "error-log.json"),
 }) {
   const app = express();
   const events = new EventEmitter();
@@ -94,7 +103,9 @@ export function createServer({
   let pingTimer = null;
   let idleTimer = null;
   const claudeLinks = new Map(); // key -> { claudeSessionId, transcriptPath }: keeps state.json off the log hot path
+  const agents = new Map(); // key -> { agent, sessionId, working }: the last poller, for the panel's status line
   let pendingLaunch = null; // { key, at }: one launch at a time across the whole server
+  const transcripts = new Map(); // Claude session id -> transcript path, for the log page
 
   function track(promise) {
     background.add(promise);
@@ -115,6 +126,24 @@ export function createServer({
     return session;
   }
 
+  // `working`: the last poll took feedback and no poll has listened since.
+  function presence(key) {
+    const a = agents.get(key);
+    return {
+      type: "presence",
+      listening: Boolean(activePolls.get(key)?.listening),
+      agent: a?.agent ?? null,
+      session_id: a?.sessionId ?? null,
+      working: Boolean(a?.working),
+    };
+  }
+
+  async function linkClaudeSession(key, id) {
+    await store.setClaudeSession(key, id);
+    claudeLinks.set(key, { claudeSessionId: id, transcriptPath: null });
+    broadcast(key, { type: "claude-session", id });
+  }
+
   // Idle exit: counts down only while nothing (no WebSocket, no poll) is connected.
   function updateIdle() {
     if (closing || !httpServer || !(idleTimeoutMs > 0)) return;
@@ -132,6 +161,13 @@ export function createServer({
       }, idleTimeoutMs);
       idleTimer.unref();
     }
+  }
+
+  // The log page polls over plain HTTP: each read restarts the idle countdown.
+  function touchIdle() {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+    updateIdle();
   }
 
   // One watcher per session; resolves once the watcher is ready.
@@ -249,6 +285,7 @@ export function createServer({
       if (accepted > 0) events.emit("feedback", key);
       const session = await broadcastChat(key);
       if (end) {
+        agents.delete(key);
         events.emit("ended", key);
         broadcast(key, { type: "ended", ended_by: "user" });
       }
@@ -287,6 +324,7 @@ export function createServer({
       } catch (e) {
         return sendStoreError(res, e);
       }
+      agents.delete(key);
       events.emit("ended", key);
       broadcast(key, { type: "ended", ended_by: endedBy });
       res.json({ ok: true, ended_by: endedBy });
@@ -308,6 +346,7 @@ export function createServer({
         return sendStoreError(res, e);
       }
       claudeLinks.delete(key);
+      agents.delete(key);
       broadcast(key, { type: "new-session" });
       res.json({ ok: true, status: session.status });
     } catch (e) {
@@ -346,9 +385,7 @@ export function createServer({
         if (!status) throw e;
         return res.status(status).json(errorBody(e.code, e.message));
       }
-      await store.setClaudeSession(key, sessionId);
-      claudeLinks.set(key, { claudeSessionId: sessionId, transcriptPath: null });
-      broadcast(key, { type: "claude-session", id: sessionId });
+      await linkClaudeSession(key, sessionId);
       res.json({ ok: true, claude_session_id: sessionId });
     } catch (e) {
       next(e);
@@ -366,12 +403,10 @@ export function createServer({
         return res.status(400).json(errorBody("VALIDATION_ERROR", "id must be a Claude session UUID"));
       }
       try {
-        await store.setClaudeSession(key, id);
+        await linkClaudeSession(key, id);
       } catch (e) {
         return sendStoreError(res, e);
       }
-      claudeLinks.set(key, { claudeSessionId: id, transcriptPath: null });
-      broadcast(key, { type: "claude-session", id });
       res.json({ ok: true });
     } catch (e) {
       next(e);
@@ -409,6 +444,98 @@ export function createServer({
     }
   });
 
+  app.get("/api/claude-sessions", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      }
+      res.json({ sessions: await listClaudeSessions({ claudeDir }) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/claude-sessions/:id/log", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      }
+      const { id } = req.params;
+      if (!isClaudeSessionId(id)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "id must be a Claude session UUID"));
+      }
+      touchIdle();
+      const empty = { claude_session_id: id, found: false, entries: [], next: 0, omitted: false, last_prompt_at: null };
+      const file = transcripts.get(id) ?? (await findTranscript(id, { claudeDir }));
+      if (!file) return res.json(empty);
+      transcripts.set(id, file);
+      const raw = req.query.after;
+      const after = raw === undefined ? undefined : Math.max(0, Math.floor(Number(raw)) || 0);
+      let read;
+      try {
+        let maxBytes = PAGE_LOG_BYTES;
+        read = await readTranscript(file, { after, maxBytes });
+        while (after === undefined && read.omitted && read.entries.length < PAGE_MIN_ENTRIES && maxBytes < PAGE_MAX_BYTES) {
+          maxBytes *= 2;
+          read = await readTranscript(file, { after, maxBytes });
+        }
+      } catch (e) {
+        if (e?.code !== "ENOENT") throw e;
+        transcripts.delete(id); // the file moved or was removed: look again next time
+        return res.json(empty);
+      }
+      const body = { ...empty, found: true, ...read };
+      if (after === undefined) {
+        // First read: the header needs the last prompt even when it is older than the tail window.
+        if (!body.last_prompt_at) body.last_prompt_at = await findLastPromptAt(file, read.next);
+        body.reported = await reportedRefs(errorLogFile, id); // and the page marks entries already logged
+      }
+      res.json(body);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // The log page's clicks: the server appends the entry itself, as no agent may be listening there.
+  app.post("/api/claude-errors", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Log entries must come from the log page"));
+      }
+      const e = req.body?.entry;
+      const valid = e && typeof e === "object"
+        && isClaudeSessionId(e.claude_session_id)
+        && isText(e.uuid) && e.uuid.length <= 100
+        && Number.isInteger(e.part) && e.part >= 0 && e.part < 1000
+        && LOG_ROLES.has(e.role) && LOG_KINDS.has(e.kind)
+        && (e.at === null || (typeof e.at === "string" && e.at.length <= 64))
+        && typeof e.text === "string" && e.text.length <= MAX_LOG_TEXT;
+      if (!valid) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "entry must be one Claude log entry"));
+      }
+      const record = {
+        claude_session_id: e.claude_session_id,
+        uuid: e.uuid,
+        part: e.part,
+        role: e.role,
+        kind: e.kind,
+        at: e.at,
+        text: e.text,
+        reported_at: new Date().toISOString(),
+      };
+      let result;
+      try {
+        result = await appendErrorLog(errorLogFile, record);
+      } catch (err) {
+        if (!(err instanceof ErrorLogError)) throw err;
+        return res.status(409).json(errorBody(err.code, err.message));
+      }
+      res.json({ ok: true, duplicate: result.duplicate, error_log: errorLogFile });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   // GET skips the origin guard, yet a poll consumes feedback: refuse browser cross-site loads.
   // The query never carries agent_reply (writes go through POST).
   app.get("/api/poll", (req, res, next) => {
@@ -423,7 +550,7 @@ export function createServer({
     track(handlePoll(req, res, req.body ?? {}).catch(next));
   });
 
-  async function handlePoll(req, res, { file, agent_reply: agentReply, timeoutMs: rawTimeout }) {
+  async function handlePoll(req, res, { file, agent_reply: agentReply, timeoutMs: rawTimeout, agent, claude_session_id: claudeSessionId }) {
     // Registered before any await so a client that vanishes early is never missed.
     let vanished = false;
     let poll = null;
@@ -463,6 +590,9 @@ export function createServer({
     if (agentReply !== undefined && !isText(agentReply)) {
       return res.status(400).json(errorBody("VALIDATION_ERROR", "agent_reply must be non-empty text"));
     }
+    if (claudeSessionId !== undefined && !isClaudeSessionId(claudeSessionId)) {
+      return res.status(400).json(errorBody("VALIDATION_ERROR", "claude_session_id must be a Claude session UUID"));
+    }
     let key;
     try {
       key = sessionKey(await canonicalFile(file));
@@ -491,6 +621,9 @@ export function createServer({
     poll = {
       key,
       listening: false,
+      agent: agent === "claude" ? "claude" : null,
+      sessionId: claudeSessionId ?? null,
+      delivered: false,
       notify,
       released: false,
       release() {
@@ -500,9 +633,9 @@ export function createServer({
         events.off("ended", onEvent);
         clearTimeout(timer);
         if (activePolls.get(key) === poll) activePolls.delete(key);
-        if (poll.listening) {
+        if (poll.listening || poll.delivered) {
           poll.listening = false;
-          broadcast(key, { type: "presence", listening: false });
+          broadcast(key, presence(key));
         }
         notify();
         updateIdle();
@@ -514,6 +647,10 @@ export function createServer({
     updateIdle();
 
     try {
+      // An agent's own session id fills an empty slot only: it never replaces one the user picked.
+      if (poll.sessionId && !(claudeLinks.get(key)?.claudeSessionId ?? existing.claude_session_id)) {
+        await linkClaudeSession(key, poll.sessionId);
+      }
       if (agentReply !== undefined) {
         await store.appendAgentReply(key, agentReply);
         await broadcastChat(key);
@@ -525,7 +662,8 @@ export function createServer({
         if (!poll.listening) {
           poll.listening = true;
           if (pendingLaunch?.key === key) pendingLaunch = null;
-          broadcast(key, { type: "presence", listening: true });
+          agents.set(key, { agent: poll.agent, sessionId: poll.sessionId, working: false });
+          broadcast(key, presence(key));
           if (timeoutMs > 0) {
             timer = setTimeout(() => {
               timedOut = true;
@@ -546,6 +684,10 @@ export function createServer({
         restoreUnconfirmed();
         return;
       }
+      if (result.status === "feedback" && !result.session_ended) {
+        agents.set(key, { agent: poll.agent, sessionId: poll.sessionId, working: true });
+        poll.delivered = true;
+      }
       poll.release();
       res.json(result);
     } finally {
@@ -563,6 +705,12 @@ export function createServer({
     } catch (e) {
       next(e);
     }
+  });
+
+  app.get("/claude", (req, res) => {
+    res.set("X-Frame-Options", "DENY");
+    res.set("Content-Security-Policy", "frame-ancestors 'none'");
+    res.type("html").send(createLogsHtml({ baseUrl }));
   });
 
   app.get("/artifact/:key/index.html", async (req, res, next) => {
@@ -601,7 +749,7 @@ export function createServer({
     }
   });
 
-  for (const name of ["sdk.js", "chrome-client.js", "chrome.css"]) {
+  for (const name of ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css"]) {
     app.get(`/${name}`, (req, res, next) => {
       res.set("Cache-Control", "no-cache");
       res.sendFile(name, { root: PUBLIC_DIR }, (err) => {
@@ -660,7 +808,7 @@ export function createServer({
       if (set && set.size === 0) sockets.delete(key);
       updateIdle();
     });
-    ws.send(JSON.stringify({ type: "presence", listening: Boolean(activePolls.get(key)?.listening) }));
+    ws.send(JSON.stringify(presence(key)));
     ws.send(JSON.stringify({ type: "chat", chat: serializeChat(session.chat) }));
     // Lets a (re)connecting client notice a reload it missed while disconnected.
     ws.send(JSON.stringify({ type: "revision", revision: session.revision }));

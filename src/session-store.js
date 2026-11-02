@@ -21,6 +21,7 @@ const now = () => new Date().toISOString();
 function anchorFor(p) {
   if (p.tag === "text") return "text selection";
   if (p.tag === "chat") return "";
+  if (p.tag === "claude-log") return "Claude log entry";
   return `${p.tag} ${p.selector}`;
 }
 
@@ -136,7 +137,7 @@ export class SessionStore {
         }
         s.prompts.push(...accepted);
         if (accepted.length) {
-          s.dom_snapshot = dom_snapshot;
+          if (dom_snapshot) s.dom_snapshot = dom_snapshot; // a log entry sends none: keep the page's last one
           s.status = "feedback";
         }
         if (end) {

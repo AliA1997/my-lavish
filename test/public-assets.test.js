@@ -78,3 +78,27 @@ test("log entries never use innerHTML", async (t) => {
   const html = createChromeHtml({ key: "k", file: "f.html", status: "open", chat: [], revision: 0 }, { baseUrl });
   for (const id of ["tabChat", "tabLog", "claudeLog"]) assert.ok(html.includes(`id="${id}"`));
 });
+
+test("agent status and the recent-sessions picker are on the page and wired in the client", async (t) => {
+  const { baseUrl } = await setup(t);
+  const html = createChromeHtml({ key: "k", file: "f.html", status: "open", chat: [], revision: 0 }, { baseUrl });
+  for (const id of ["agentStatus", "agentStatusText", "claudeHeader", "claudeChange", "claudePicker", "claudeSessions", "claudeAttach"]) {
+    assert.ok(html.includes(`id="${id}"`), id);
+  }
+  const source = await fetchAsset(baseUrl, "chrome-client.js");
+  assert.ok(source.includes('"/api/claude-sessions"'));
+  assert.ok(source.includes('"claude-log"'));
+  assert.ok(source.includes("~/claude-errors/error-log.json"));
+});
+
+test("the Claude log page and its files are served", async (t) => {
+  const { baseUrl } = await setup(t);
+  const html = await (await fetch(`${baseUrl}/claude`)).text();
+  for (const id of ["sessionId", "lastPrompt", "sessionSelect", "entries", "status"]) assert.ok(html.includes(`id="${id}"`), id);
+  assert.ok(html.includes('src="/logs-client.js"') && html.includes('href="/logs.css"'));
+  const client = await fetchAsset(baseUrl, "logs-client.js");
+  assert.doesNotThrow(() => new Function(client), "logs-client.js has a syntax error");
+  assert.ok(!client.includes("innerHTML"), "transcript text is set with textContent only");
+  assert.ok(client.includes("/api/claude-errors") && client.includes("/api/claude-sessions/"));
+  await fetchAsset(baseUrl, "logs.css");
+});

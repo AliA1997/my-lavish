@@ -179,3 +179,15 @@ test("new session on an open session is NOT_ENDED", async (t) => {
   const { store, key } = await endedStore(t);
   await assert.rejects(store.startNewSession(key), { code: "NOT_ENDED" });
 });
+
+test("claude-log prompts get their own anchor and keep the pending snapshot", async (t) => {
+  const s = new SessionStore(await mk(t));
+  const { session } = await s.upsertSession(F, B);
+  const k = session.key;
+  await s.queuePrompts(k, { prompts: [P("1")], dom_snapshot: "<page>" });
+  await s.queuePrompts(k, { prompts: [P("claude-log:u:0", { tag: "claude-log" })], dom_snapshot: "" });
+  assert.equal((await s.getSession(k)).chat.at(-1).anchor, "Claude log entry");
+  const r = await s.takeFeedback(k);
+  assert.equal(r.prompts.length, 2);
+  assert.equal(r.dom_snapshot, "<page>");
+});

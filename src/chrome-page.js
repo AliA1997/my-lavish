@@ -39,6 +39,7 @@ export function createChromeHtml(session, { baseUrl } = {}) {
     <iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups" src="${src}"></iframe>
   </main>
   <aside id="panel">
+    <div id="agentStatus" role="status" hidden><span class="dot" aria-hidden="true"></span><span id="agentStatusText"></span></div>
     <div id="presenceBanner" hidden><span id="presenceText"></span> <button id="connectClaude" type="button">Connect Claude</button></div>
     <div id="endedBanner" role="status" hidden>Session ended<button id="newSession" type="button" hidden>Start new session</button></div>
     <div id="tabs" role="tablist">
@@ -47,11 +48,20 @@ export function createChromeHtml(session, { baseUrl } = {}) {
     </div>
     <div id="chatLog"></div>
     <div id="claudeLog" hidden>
-      <div id="claudeAttach" hidden>
-        <input id="claudeSessionInput" type="text" placeholder="Claude session id" autocomplete="off" spellcheck="false">
-        <button id="claudeAttachButton" type="button">Attach</button>
+      <div id="claudeHeader" hidden>
+        <span id="claudeCurrent"></span>
+        <button id="claudeChange" type="button">Change session</button>
+        <p class="claude-tip">Click an entry to send it to the agent for ~/claude-errors/error-log.json.</p>
       </div>
       <p id="claudeStatus"></p>
+      <div id="claudePicker" hidden>
+        <p class="picker-title">Recent Claude sessions</p>
+        <div id="claudeSessions"></div>
+        <div id="claudeAttach">
+          <input id="claudeSessionInput" type="text" placeholder="Or paste a Claude session id" autocomplete="off" spellcheck="false">
+          <button id="claudeAttachButton" type="button">Attach</button>
+        </div>
+      </div>
       <div id="claudeEntries"></div>
     </div>
     <div id="queuedLog"></div>

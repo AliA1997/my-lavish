@@ -1,2 +1,5 @@
 node_modules/
 *.log
+docs/**/*.html
+dist/
+src/version.js

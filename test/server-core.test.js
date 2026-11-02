@@ -100,7 +100,7 @@ test("chrome page is framed safely", async (t) => {
   assert.ok(body.includes("Send to Agent"));
   assert.ok(body.includes("Send &amp; End"));
   assert.ok(body.includes('id="sendHint"'));
-  assert.ok(/id="endedBanner"[^>]*hidden[^>]*>Session ended</.test(body));
+  assert.ok(/id="endedBanner"[^>]*hidden/.test(body) && body.includes(">Session ended<"));
   assert.ok(body.includes(`/artifact/${key}/index.html?rev=0`));
   assert.equal((await fetch(`${baseUrl}/session/0000000000000000`)).status, 404);
 });

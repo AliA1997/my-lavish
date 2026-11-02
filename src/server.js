@@ -1281,7 +1281,8 @@ export function createServer({
       res.set("Content-Security-Policy", "frame-ancestors 'none'");
       const canResume = isClaudeSessionId(session.claude_session_id)
         && Boolean(await findTranscript(session.claude_session_id, { claudeDir }).catch(() => null));
-      res.type("html").send(createChromeHtml(session, { baseUrl, canResume }));
+      const workflow = session.workflow_id ? await getWorkflow(store, session.workflow_id) : null;
+      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow }));
     } catch (e) {
       next(e);
     }

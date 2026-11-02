@@ -13,7 +13,7 @@ function artifactTitle(session) {
   return "my-lavish-axi";
 }
 
-export function createChromeHtml(session, { baseUrl } = {}) {
+export function createChromeHtml(session, { baseUrl, canResume = false } = {}) {
   const data = {
     key: session.key,
     file: session.file,
@@ -21,6 +21,7 @@ export function createChromeHtml(session, { baseUrl } = {}) {
     ended_by: session.ended_by ?? null,
     chat: serializeChat(session.chat ?? []),
     claude_session_id: session.claude_session_id ?? null,
+    can_resume: Boolean(canResume),
   };
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
   const title = escapeHtml(artifactTitle(session));

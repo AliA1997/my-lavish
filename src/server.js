@@ -16,7 +16,7 @@ import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
 import { isMarkdownPath } from "./plan-markdown.js";
 import { findLastPromptAt, findTranscript, listClaudeSessions, readTranscript } from "./claude-log.js";
-import { findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
+import { buildPrompt, claudeStatus as realClaudeStatus, findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -89,6 +89,7 @@ export function createServer({
   version,
   log = () => {},
   launchClaude = realLaunchClaude,
+  claudeStatus = realClaudeStatus,
   claudeDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"),
   errorLogFile = path.join(os.homedir(), "claude-errors", "error-log.json"),
   agentPollMs = AGENT_POLL_MS,
@@ -405,6 +406,28 @@ export function createServer({
     }
   });
 
+  let statusCache = null; // findClaude spawns `where`/`which`: once per process is enough
+  app.get("/api/claude-status", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      }
+      statusCache ??= claudeStatus();
+      res.json(await statusCache);
+    } catch (e) {
+      statusCache = null;
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/connect-cancel", async (req, res) => {
+    if (!requireSameOrigin(req)) {
+      return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cancel must come from the session page"));
+    }
+    pendingLaunch.delete(req.params.key);
+    res.json({ ok: true });
+  });
+
   app.post("/api/:key/connect-claude", async (req, res, next) => {
     try {
       // The origin guard already refused cross-site callers; header-less CLI calls pass but must send JSON.
@@ -425,14 +448,26 @@ export function createServer({
       if (launchedAt !== undefined && Date.now() - launchedAt < connectCooldownMs) {
         return res.status(409).json(errorBody("CONNECT_PENDING", "A Claude window was just started; wait for it to begin polling"));
       }
-      const sessionId = crypto.randomUUID();
+      const resume = req.body?.resume === true;
+      let sessionId = crypto.randomUUID();
+      if (resume) {
+        const id = session.claude_session_id;
+        if (!isClaudeSessionId(id) || !(await findTranscript(id, { claudeDir }))) {
+          return res.status(409).json(errorBody("NOTHING_TO_RESUME", "This session has no earlier Claude conversation to resume"));
+        }
+        sessionId = id;
+      }
       const launch = Date.now();
       pendingLaunch.set(key, launch); // set before any await so a double click cannot start two windows
+      const file = session.source_file ?? session.file;
+      let launched;
       try {
-        await launchClaude({
-          file: session.source_file ?? session.file,
+        launched = await launchClaude({
+          file,
           cwd: await findRepoRoot(session.dir),
           sessionId,
+          resume,
+          prompt: buildPrompt({ file }),
         });
       } catch (e) {
         if (pendingLaunch.get(key) === launch) pendingLaunch.delete(key);
@@ -440,8 +475,9 @@ export function createServer({
         if (!status) throw e;
         return res.status(status).json(errorBody(e.code, e.message));
       }
-      await linkClaudeSession(key, sessionId);
-      res.json({ ok: true, claude_session_id: sessionId });
+      if (!resume) await linkClaudeSession(key, sessionId);
+      const mode = launched?.mode ?? "powershell";
+      res.json({ ok: true, claude_session_id: sessionId, mode, ...(launched?.command ? { command: launched.command } : {}) });
     } catch (e) {
       next(e);
     }
@@ -766,7 +802,9 @@ export function createServer({
       if (!session) return res.status(404).json(errorBody("NOT_FOUND", "Unknown session"));
       res.set("X-Frame-Options", "DENY");
       res.set("Content-Security-Policy", "frame-ancestors 'none'");
-      res.type("html").send(createChromeHtml(session, { baseUrl }));
+      const canResume = isClaudeSessionId(session.claude_session_id)
+        && Boolean(await findTranscript(session.claude_session_id, { claudeDir }).catch(() => null));
+      res.type("html").send(createChromeHtml(session, { baseUrl, canResume }));
     } catch (e) {
       next(e);
     }

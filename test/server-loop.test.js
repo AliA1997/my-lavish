@@ -910,3 +910,43 @@ test("notes sent with no agent around are only queued", async (t) => {
   const { key, postPrompts } = await setup(t);
   assert.equal((await (await postPrompts(key, { prompts: [note("x")] })).json()).delivered, "queued");
 });
+
+test("claude-status reports how Connect Claude would launch", async (t) => {
+  let calls = 0;
+  const status = { platform: "linux", launch: "copy", claude_found: true, claude_path: "/usr/bin/claude" };
+  const { baseUrl } = await setup(t, { claudeStatus: async () => { calls++; return status; } });
+  assert.deepEqual(await (await fetch(`${baseUrl}/api/claude-status`)).json(), status);
+  await fetch(`${baseUrl}/api/claude-status`);
+  assert.equal(calls, 1, "cached per process");
+  assert.equal((await fetch(`${baseUrl}/api/claude-status`, { headers: { "Sec-Fetch-Site": "cross-site" } })).status, 403);
+});
+
+test("connect-claude returns copy mode and the launch prompt carries the label", async (t) => {
+  const calls = [];
+  const { key, postJson, baseUrl } = await setup(t, {
+    launchClaude: async (args) => { calls.push(args); return { mode: "copy", command: "cd x && claude" }; },
+  });
+  const body = await (await postJson(`/api/${key}/connect-claude`, {})).json();
+  assert.deepEqual([body.mode, body.command], ["copy", "cd x && claude"]);
+  assert.ok(calls[0].prompt.startsWith("[see-plan · a · Review]"));
+  assert.match(calls[0].prompt, /1:50/);
+  assert.equal((await postJson(`/api/${key}/connect-claude`, {})).status, 409, "cooldown");
+  assert.equal((await postJson(`/api/${key}/connect-cancel`, {})).status, 403, "cancel needs the page origin");
+  assert.equal((await postJson(`/api/${key}/connect-cancel`, {}, { Origin: baseUrl })).status, 200);
+  assert.equal((await postJson(`/api/${key}/connect-claude`, {})).status, 200, "cancel clears the cooldown");
+});
+
+test("connect-claude resume reuses a session that has a transcript", async (t) => {
+  const { claudeDir } = await claudeFixture(t);
+  const fake = fakeLauncher();
+  const { key, postJson, baseUrl } = await setup(t, { claudeDir, launchClaude: fake.launchClaude });
+  const none = await postJson(`/api/${key}/connect-claude`, { resume: true });
+  assert.equal(none.status, 409);
+  assert.equal((await none.json()).error.code, "NOTHING_TO_RESUME");
+  await postJson(`/api/${key}/claude-session`, { id: CLAUDE_ID });
+  assert.ok((await bootstrap(baseUrl, key)).can_resume);
+  const res = await postJson(`/api/${key}/connect-claude`, { resume: true });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).claude_session_id, CLAUDE_ID);
+  assert.deepEqual([fake.calls[0].resume, fake.calls[0].sessionId], [true, CLAUDE_ID]);
+});

@@ -14,18 +14,28 @@ import { createLogsHtml } from "./logs-page.js";
 import { appendErrorLog, ErrorLogError, reportedRefs } from "./error-log.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
-import { isMarkdownPath } from "./plan-markdown.js";
+import { ensurePlanHtml, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
+import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, inferStageFromText, isStage, nextStage, stageInstructions } from "./stages.js";
+import { listRevisions, readRevision, saveRevision } from "./revisions.js";
+import { appendFeedback } from "./feedback-log.js";
+import {
+  advanceWorkflow, createWorkflow, ensureStageFile, getWorkflow, isFeatureName, listWorkflows, reopenStage,
+  requirementsFile, stageFile, updateStage,
+} from "./workflow-store.js";
+import { createHomeHtml } from "./home-page.js";
 import { findLastPromptAt, findTranscript, listClaudeSessions, readTranscript } from "./claude-log.js";
 import { buildPrompt, claudeStatus as realClaudeStatus, findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
+export const PUBLIC_ASSETS = ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css"];
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const PING_INTERVAL_MS = 30000;
 const CONNECT_COOLDOWN_MS = 60000;
 export const AGENT_POLL_MS = 110000; // under Claude Code's default 120 s Bash timeout
 const PRESENCE_GRACE_MS = 20000; // a re-poll within this window is invisible to the user
 const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424 };
-const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409 };
+const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409, UNSENT_NOTES: 409, NOT_CURRENT: 409 };
+const MAX_FEEDBACK_TEXT = 4000;
 const LOG_ROLES = new Set(["user", "assistant"]);
 const LOG_KINDS = new Set(["text", "tool_use", "tool_result"]);
 const MAX_LOG_TEXT = 20000;
@@ -115,6 +125,9 @@ export function createServer({
   const lastPresence = new Map(); // key -> JSON of the last visible presence broadcast
   const lastPollAt = new Map(); // key -> ISO time of the last poll that listened
   const transcripts = new Map(); // Claude session id -> transcript path, for the log page
+  const homeSockets = new Set(); // the dashboard's /events/home sockets
+  let homeTimer = null;
+  const feedbackFile = path.join(stateDir ?? os.tmpdir(), "feedback.jsonl");
 
   function track(promise) {
     background.add(promise);
@@ -123,6 +136,7 @@ export function createServer({
   }
 
   function broadcast(key, message) {
+    if (message.type !== "chat") notifyHome();
     const set = sockets.get(key);
     if (!set) return;
     const data = JSON.stringify(message);
@@ -184,6 +198,40 @@ export function createServer({
     return true;
   }
 
+  function sessionSummary(s) {
+    const live = Boolean(activePolls.get(s.key)?.listening) || inGrace(s.key);
+    return {
+      key: s.key,
+      file: s.source_file ?? s.file,
+      url: s.url,
+      stage: s.stage ?? null,
+      stage_source: s.stage_source ?? null,
+      status: s.status,
+      ended_by: s.ended_by ?? null,
+      workflow_id: s.workflow_id ?? null,
+      updated_at: s.updated_at,
+      agent: live ? (agents.get(s.key)?.agent ?? "agent") : agents.get(s.key)?.working ? "working" : null,
+    };
+  }
+
+  async function homeSnapshot() {
+    const sessions = (await store.listSessions()).map(sessionSummary);
+    return { type: "sessions", sessions, workflows: await listWorkflows(store) };
+  }
+
+  // Debounced: one dashboard update per burst of changes.
+  function notifyHome() {
+    if (!homeSockets.size || homeTimer || closing) return;
+    homeTimer = setTimeout(() => {
+      homeTimer = null;
+      track(homeSnapshot().then((snap) => {
+        const data = JSON.stringify(snap);
+        for (const ws of homeSockets) if (ws.readyState === ws.OPEN) ws.send(data);
+      }, (e) => log(`home update failed: ${e?.message ?? e}`)));
+    }, 100);
+    homeTimer.unref();
+  }
+
   async function linkClaudeSession(key, id) {
     await store.setClaudeSession(key, id);
     claudeLinks.set(key, { claudeSessionId: id, transcriptPath: null });
@@ -193,7 +241,7 @@ export function createServer({
   // Idle exit: counts down only while nothing (no WebSocket, no poll) is connected.
   function updateIdle() {
     if (closing || !httpServer || !(idleTimeoutMs > 0)) return;
-    let connected = activePolls.size;
+    let connected = activePolls.size + homeSockets.size;
     for (const set of sockets.values()) connected += set.size;
     if (connected > 0) {
       clearTimeout(idleTimer);
@@ -225,7 +273,12 @@ export function createServer({
         if (closing) return;
         track(
           store.bumpRevision(key).then(
-            (revision) => broadcast(key, { type: "reload", revision }),
+            async (revision) => {
+              const current = await store.getSession(key);
+              await saveRevision(stateDir, key, revision, { file: session.file, sourceFile: current?.source_file })
+                .catch((e) => log(`revision save failed for ${key}: ${e?.message ?? e}`));
+              broadcast(key, { type: "reload", revision });
+            },
             (e) => log(`revision bump failed for ${key}: ${e?.message ?? e}`),
           ),
         );
@@ -233,7 +286,20 @@ export function createServer({
       onError: (e) => log(`watcher error for ${key}: ${e?.message ?? e}`),
     });
     watchers.set(key, watcher);
-    return watcher.ready;
+    const ready = [watcher.ready];
+    // A Markdown plan: editing the .md regenerates the html, which the watcher above then reloads.
+    if (session.source_file && htmlPathFor(session.source_file) === session.file) {
+      const md = watchArtifact(session.source_file, {
+        onChange: () => {
+          if (closing) return;
+          track(ensurePlanHtml(session.source_file).catch((e) => log(`md regenerate failed for ${key}: ${e?.message ?? e}`)));
+        },
+        onError: (e) => log(`md watcher error for ${key}: ${e?.message ?? e}`),
+      });
+      watchers.set(`${key}:md`, md);
+      ready.push(md.ready);
+    }
+    return Promise.all(ready);
   }
 
   app.disable("x-powered-by");
@@ -269,7 +335,10 @@ export function createServer({
 
   app.post("/api/sessions", async (req, res, next) => {
     try {
-      const { file, reopen, source_file: sourceFile } = req.body ?? {};
+      const { file, reopen, source_file: sourceFile, stage } = req.body ?? {};
+      if (stage !== undefined && !isStage(stage)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", `stage must be one of ${STAGES.join(", ")}`));
+      }
       if (typeof file !== "string" || !file) {
         return res.status(400).json(errorBody("VALIDATION_ERROR", "file is required"));
       }
@@ -294,13 +363,17 @@ export function createServer({
       }
       let result;
       try {
-        result = await store.upsertSession(real, baseUrl, { reopen: Boolean(reopen), source_file: source });
+        result = await store.upsertSession(real, baseUrl, { reopen: Boolean(reopen), source_file: source, stage });
       } catch (e) {
         return sendStoreError(res, e);
       }
       const { status, session } = result;
+      if (status === "opened") {
+        await saveRevision(stateDir, session.key, session.revision, { file: session.file, sourceFile: session.source_file }).catch(() => {});
+      }
       await watchSession(session);
-      res.json({ status, key: session.key, url: session.url });
+      notifyHome();
+      res.json({ status, key: session.key, url: session.url, stage: session.stage ?? null, stage_source: session.stage_source ?? null });
     } catch (e) {
       next(e);
     }
@@ -330,6 +403,13 @@ export function createServer({
       }
       const agentNear = Boolean(activePolls.get(key)?.listening) || inGrace(key);
       if (accepted > 0) events.emit("feedback", key);
+      for (const p of prompts) {
+        if (p.tag !== "chat") continue;
+        const inferred = inferStageFromText(p.prompt);
+        if (!inferred) continue;
+        const r = await store.setStage(key, inferred, "text").catch(() => null);
+        if (r?.changed) broadcast(key, { type: "stage", stage: r.stage, source: r.stage_source });
+      }
       const session = await broadcastChat(key);
       if (end) {
         agents.delete(key);
@@ -406,6 +486,373 @@ export function createServer({
     }
   });
 
+  // The panel's stage dropdown (source "human") or `see-plan stage <file> <name>` (source "flag").
+  app.post("/api/:key/stage", async (req, res, next) => {
+    try {
+      const fromPage = (req.headers.origin ?? req.headers.referer) !== undefined;
+      if (fromPage ? !requireSameOrigin(req) : !req.is("application/json")) {
+        return res.status(fromPage ? 403 : 415).json(errorBody(fromPage ? "FORBIDDEN_ORIGIN" : "UNSUPPORTED_MEDIA_TYPE", "Refused"));
+      }
+      const { stage } = req.body ?? {};
+      if (stage !== null && !isStage(stage)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", `stage must be null or one of ${STAGES.join(", ")}`));
+      }
+      let r;
+      try {
+        r = await store.setStage(req.params.key, stage, fromPage ? "human" : "flag");
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      if (r.changed) broadcast(req.params.key, { type: "stage", stage: r.stage, source: r.stage_source });
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/:key/status", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      }
+      const s = await store.getSession(req.params.key);
+      if (!s) return res.status(404).json({ status: "missing" });
+      res.json({
+        session: {
+          file: s.source_file ?? s.file,
+          status: s.status,
+          ...(s.ended_by ? { ended_by: s.ended_by } : {}),
+          stage: s.stage ?? null,
+          stage_source: s.stage_source ?? null,
+          listening: Boolean(activePolls.get(s.key)?.listening) || inGrace(s.key),
+          queued_prompts: s.prompts.length,
+          claude_session_id: s.claude_session_id ?? null,
+          revision: s.revision,
+          ...(s.workflow_id ? { workflow_id: s.workflow_id } : {}),
+          ...(s.decision ? { decision: s.decision.value } : {}),
+        },
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/session-feedback", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Session feedback must come from the session page"));
+      }
+      const { key } = req.params;
+      const { rating, categories = [], text = "" } = req.body ?? {};
+      const valid = (rating === "up" || rating === "down")
+        && Array.isArray(categories) && categories.length <= SESSION_FEEDBACK_CATEGORIES.length
+        && categories.every((c) => SESSION_FEEDBACK_CATEGORIES.includes(c))
+        && typeof text === "string" && text.length <= MAX_FEEDBACK_TEXT;
+      if (!valid) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", `rating must be up or down; categories from ${SESSION_FEEDBACK_CATEGORIES.join(", ")}`));
+      }
+      const session = await store.getSession(key);
+      if (!session) return res.status(404).json(errorBody("MISSING", `no session ${key}`));
+      const target = { rating, categories: [...new Set(categories)], claude_session_id: session.claude_session_id ?? null, stage: session.stage ?? null };
+      const titles = target.categories.map((c) => CATEGORY_TITLES[c]);
+      const prompt = {
+        prompt_id: crypto.randomUUID(),
+        prompt: `Session feedback: ${rating === "up" ? "👍" : "👎"}${titles.length ? ` (${titles.join(", ")})` : ""}${text.trim() ? ` ${text.trim()}` : ""}`,
+        tag: "session-feedback",
+        selector: "",
+        text: "",
+        target,
+      };
+      let accepted;
+      try {
+        ({ accepted } = await store.queuePrompts(key, { prompts: [prompt] }));
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      await appendFeedback(feedbackFile, { kind: "session", key, file: session.source_file ?? session.file, ...target, text: text.trim(), at: new Date().toISOString() });
+      if (accepted) events.emit("feedback", key);
+      const updated = await broadcastChat(key);
+      res.json({ ok: true, chat: serializeChat(updated?.chat ?? []) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  /** Opens (or reuses) the session for one workflow stage and returns it. */
+  async function openStageSession(wf, stage) {
+    const target = await ensureStageFile(wf, stage);
+    let file = target;
+    let sourceFile;
+    if (isMarkdownPath(target)) {
+      sourceFile = await canonicalFile(target);
+      file = (await ensurePlanHtml(target)).htmlPath;
+    }
+    const real = await canonicalFile(file);
+    const { session } = await store.upsertSession(real, baseUrl, { reopen: true, source_file: sourceFile, stage, workflow_id: wf.id });
+    if (session.revision === 0) await saveRevision(stateDir, session.key, 0, { file: session.file, sourceFile }).catch(() => {});
+    await watchSession(session);
+    await updateStage(store, wf.id, stage, { key: session.key });
+    return session;
+  }
+
+  /** Stage N is done or skipped: open stage N+1's session and tell the page. */
+  async function advance(wf, from, { skipped = false } = {}) {
+    const { workflow, next } = await advanceWorkflow(store, wf.id, { from, skipped });
+    let nextSession = null;
+    if (next) nextSession = await openStageSession(workflow, next);
+    const fromKey = workflow.stages[from].key;
+    const message = { type: "stage-ready", workflow_id: workflow.id, from, next, next_url: nextSession?.url ?? null, next_key: nextSession?.key ?? null };
+    if (fromKey) broadcast(fromKey, message);
+    notifyHome();
+    return { workflow: await getWorkflow(store, workflow.id), next, next_url: message.next_url, next_key: message.next_key };
+  }
+
+  app.post("/api/:key/decision", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Decisions must come from the session page"));
+      }
+      const { key } = req.params;
+      const { decision, comment = "", force = false } = req.body ?? {};
+      if ((decision !== "approve" && decision !== "request-changes") || typeof comment !== "string" || comment.length > MAX_FEEDBACK_TEXT) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "decision must be approve or request-changes"));
+      }
+      if (decision === "request-changes" && !comment.trim()) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "Say what should change"));
+      }
+      const before = await store.getSession(key);
+      if (!before) return res.status(404).json(errorBody("MISSING", `no session ${key}`));
+      const stageName = STAGE_TITLES[before.stage] ?? "plan";
+      const prompt = {
+        prompt_id: crypto.randomUUID(),
+        prompt: decision === "approve"
+          ? `Approved the ${stageName.toLowerCase()}.${comment.trim() ? ` ${comment.trim()}` : ""}`
+          : `Request changes: ${comment.trim()}`,
+        tag: "decision",
+        selector: "",
+        text: "",
+        target: { decision, comment: comment.trim(), stage: before.stage ?? null, revision: before.revision },
+      };
+      let session;
+      try {
+        session = await store.setDecision(key, { value: decision, comment: comment.trim(), prompt, force: force === true });
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      await appendFeedback(feedbackFile, { kind: "decision", key, file: session.source_file ?? session.file, decision, comment: comment.trim(), stage: session.stage ?? null, revision: session.revision, at: new Date().toISOString() });
+      events.emit("feedback", key);
+      await broadcastChat(key);
+      const out = { ok: true, decision, status: session.status };
+      const wf = session.workflow_id ? await getWorkflow(store, session.workflow_id) : null;
+      if (decision === "approve") {
+        agents.delete(key);
+        lastPresence.delete(key);
+        clearGrace(key);
+        events.emit("ended", key);
+        broadcast(key, { type: "ended", ended_by: "approved" });
+        if (wf && wf.current === session.stage) Object.assign(out, await advance(wf, session.stage));
+      } else if (wf && session.stage === "verification" && wf.current === "verification") {
+        // Rejected verification: back to implementation with the issues queued as feedback.
+        const reopened = await reopenStage(store, wf.id, "implementation");
+        const implKey = reopened.stages.implementation.key;
+        if (implKey) {
+          const impl = await store.getSession(implKey);
+          if (impl?.status === "ended") await store.reopenSession(implKey);
+          await store.queuePrompts(implKey, {
+            prompts: [{ prompt_id: crypto.randomUUID(), prompt: `Verification found issues: ${comment.trim()}`, tag: "decision", selector: "", text: "", target: { decision: "request-changes", from: "verification" } }],
+          });
+          events.emit("feedback", implKey);
+          await broadcastChat(implKey);
+          const implSession = await store.getSession(implKey);
+          const message = { type: "stage-ready", workflow_id: wf.id, from: "verification", next: "implementation", next_url: implSession.url, next_key: implKey, reopened: true };
+          broadcast(key, message);
+          Object.assign(out, { next: "implementation", next_url: implSession.url, next_key: implKey, workflow: reopened });
+        }
+      }
+      res.json(out);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/reopen", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Reopen must come from the session page"));
+      }
+      let session;
+      try {
+        session = await store.reopenSession(req.params.key);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      broadcast(req.params.key, { type: "new-session" });
+      res.json({ ok: true, status: session.status });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/archive", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Archive must come from the dashboard"));
+      }
+      try {
+        await store.setArchived(req.params.key, req.body?.archived !== false);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      notifyHome();
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/sessions", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      }
+      const snap = await homeSnapshot();
+      res.json({ sessions: snap.sessions, workflows: snap.workflows });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/prune", async (req, res, next) => {
+    try {
+      if (!req.is("application/json")) {
+        return res.status(415).json(errorBody("UNSUPPORTED_MEDIA_TYPE", "Content-Type must be application/json"));
+      }
+      const dryRun = req.body?.dry_run === true;
+      const removed = await store.pruneMissing({ dryRun });
+      if (!dryRun) {
+        for (const { key } of removed) {
+          for (const k of [key, `${key}:md`]) {
+            const w = watchers.get(k);
+            watchers.delete(k);
+            if (w) track(w.close());
+          }
+        }
+        notifyHome();
+      }
+      res.json({ removed, dry_run: dryRun });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/:key/revisions", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      }
+      const s = await store.getSession(req.params.key);
+      if (!s) return res.status(404).json(errorBody("MISSING", `no session ${req.params.key}`));
+      res.json({ revision: s.revision, revisions: await listRevisions(stateDir, s.key) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/:key/revisions/:n", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      }
+      const s = await store.getSession(req.params.key);
+      if (!s) return res.status(404).json(errorBody("MISSING", `no session ${req.params.key}`));
+      const html = await readRevision(stateDir, s.key, Number(req.params.n));
+      if (html === null) return res.status(404).json(errorBody("NOT_FOUND", "No such revision"));
+      res.set("Cache-Control", "no-cache");
+      res.json({ n: Number(req.params.n), html });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ---- workflows: Plan → Interrogation → Implementation → Verification ----
+
+  app.post("/api/workflows", async (req, res, next) => {
+    try {
+      const fromPage = (req.headers.origin ?? req.headers.referer) !== undefined;
+      if (fromPage ? !requireSameOrigin(req) : !req.is("application/json")) {
+        return res.status(fromPage ? 403 : 415).json(errorBody(fromPage ? "FORBIDDEN_ORIGIN" : "UNSUPPORTED_MEDIA_TYPE", "Refused"));
+      }
+      const { name, dir, requirements, requirements_file: reqFile } = req.body ?? {};
+      if (!isFeatureName(name)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "name must be letters, digits, dot, dash or underscore (max 64)"));
+      }
+      if (typeof dir !== "string" || !path.isAbsolute(dir)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "dir must be an absolute folder path"));
+      }
+      const st = await fs.promises.stat(dir).catch(() => null);
+      if (!st?.isDirectory()) return res.status(400).json(errorBody("VALIDATION_ERROR", "dir must be an existing folder"));
+      const realDir = await fs.promises.realpath(dir);
+      const reqPath = requirementsFile(realDir, name);
+      if (typeof requirements === "string" && requirements.trim()) {
+        if (requirements.length > 200000) return res.status(400).json(errorBody("VALIDATION_ERROR", "requirements are too long"));
+        await fs.promises.writeFile(reqPath, requirements.endsWith("\n") ? requirements : requirements + "\n");
+      } else if (typeof reqFile === "string" && reqFile) {
+        try {
+          await fs.promises.copyFile(reqFile, reqPath);
+        } catch {
+          return res.status(400).json(errorBody("VALIDATION_ERROR", "requirements_file not readable"));
+        }
+      } else if (!(await fs.promises.stat(reqPath).catch(() => null))) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "requirements (text) or requirements_file is required"));
+      }
+      const wf = await createWorkflow(store, { name, dir: realDir, requirements_file: reqPath });
+      const stage = wf.current ?? "plan";
+      const session = wf.stages[stage]?.key ? await store.getSession(wf.stages[stage].key) : await openStageSession(wf, stage);
+      notifyHome();
+      res.json({ workflow: await getWorkflow(store, wf.id), key: session.key, url: session.url, stage });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/workflows", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      res.json({ workflows: await listWorkflows(store) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/workflows/:id", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      const wf = await getWorkflow(store, req.params.id);
+      if (!wf) return res.status(404).json(errorBody("MISSING", "no such workflow"));
+      res.json({ workflow: wf });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/workflows/:id/skip", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Skip must come from the page"));
+      }
+      const wf = await getWorkflow(store, req.params.id);
+      if (!wf) return res.status(404).json(errorBody("MISSING", "no such workflow"));
+      if (!wf.current) return res.status(409).json(errorBody("WORKFLOW_DONE", "Every stage is finished"));
+      try {
+        res.json({ ok: true, ...(await advance(wf, wf.current, { skipped: true })) });
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+    } catch (e) {
+      next(e);
+    }
+  });
+
   let statusCache = null; // findClaude spawns `where`/`which`: once per process is enough
   app.get("/api/claude-status", async (req, res, next) => {
     try {
@@ -438,6 +885,10 @@ export function createServer({
       const session = await store.getSession(key);
       if (!session) return res.status(404).json(errorBody("MISSING", `no session ${key}`));
       if (session.status === "ended") return res.status(409).json(errorBody("ENDED", "session ended"));
+      const wf = session.workflow_id ? await getWorkflow(store, session.workflow_id) : null;
+      if (wf && session.stage && wf.stages[session.stage]?.status === "locked") {
+        return res.status(409).json(errorBody("STAGE_LOCKED", `Finish (approve) or skip ${STAGE_TITLES[wf.current] ?? "the current stage"} first`));
+      }
       if (activePolls.get(key)?.listening) {
         return res.status(409).json(errorBody("LISTENER_ACTIVE", "An agent is already polling this session"));
       }
@@ -467,7 +918,18 @@ export function createServer({
           cwd: await findRepoRoot(session.dir),
           sessionId,
           resume,
-          prompt: buildPrompt({ file }),
+          prompt: wf && session.stage
+            ? buildPrompt({
+              file,
+              feature: wf.name,
+              stage: session.stage,
+              instructions: stageInstructions(session.stage, {
+                requirements: wf.requirements_file,
+                plan: stageFile(wf, "plan"),
+                artifact: stageFile(wf, session.stage),
+              }),
+            })
+            : buildPrompt({ file, stage: session.stage }),
         });
       } catch (e) {
         if (pendingLaunch.get(key) === launch) pendingLaunch.delete(key);
@@ -476,6 +938,7 @@ export function createServer({
         return res.status(status).json(errorBody(e.code, e.message));
       }
       if (!resume) await linkClaudeSession(key, sessionId);
+      if (wf && session.stage) await updateStage(store, wf.id, session.stage, { claude_session_id: sessionId });
       const mode = launched?.mode ?? "powershell";
       res.json({ ok: true, claude_session_id: sessionId, mode, ...(launched?.command ? { command: launched.command } : {}) });
     } catch (e) {
@@ -641,7 +1104,7 @@ export function createServer({
     track(handlePoll(req, res, req.body ?? {}).catch(next));
   });
 
-  async function handlePoll(req, res, { file, agent_reply: agentReply, timeoutMs: rawTimeout, agent, claude_session_id: claudeSessionId }) {
+  async function handlePoll(req, res, { file, agent_reply: agentReply, timeoutMs: rawTimeout, agent, claude_session_id: claudeSessionId, stage }) {
     // Registered before any await so a client that vanishes early is never missed.
     let vanished = false;
     let poll = null;
@@ -683,6 +1146,9 @@ export function createServer({
     }
     if (claudeSessionId !== undefined && !isClaudeSessionId(claudeSessionId)) {
       return res.status(400).json(errorBody("VALIDATION_ERROR", "claude_session_id must be a Claude session UUID"));
+    }
+    if (stage !== undefined && !isStage(stage)) {
+      return res.status(400).json(errorBody("VALIDATION_ERROR", `stage must be one of ${STAGES.join(", ")}`));
     }
     let key;
     try {
@@ -749,6 +1215,10 @@ export function createServer({
       if (poll.sessionId && !(claudeLinks.get(key)?.claudeSessionId ?? existing.claude_session_id)) {
         await linkClaudeSession(key, poll.sessionId);
       }
+      if (stage !== undefined) {
+        const r = await store.setStage(key, stage, "flag");
+        if (r.changed) broadcast(key, { type: "stage", stage: r.stage, source: r.stage_source });
+      }
       if (agentReply !== undefined) {
         await store.appendAgentReply(key, agentReply);
         await broadcastChat(key);
@@ -790,7 +1260,14 @@ export function createServer({
         poll.delivered = true;
       }
       poll.release();
+      const after = await store.getSession(key);
+      if (after?.stage) Object.assign(result, { stage: after.stage, stage_source: after.stage_source });
+      if (after?.workflow_id) {
+        const wf = await getWorkflow(store, after.workflow_id);
+        if (wf) result.workflow = { id: wf.id, name: wf.name, current: wf.current, plan_file: stageFile(wf, "plan"), requirements_file: wf.requirements_file };
+      }
       res.json(result);
+      notifyHome();
     } finally {
       poll.release();
     }
@@ -808,6 +1285,12 @@ export function createServer({
     } catch (e) {
       next(e);
     }
+  });
+
+  app.get("/", (req, res) => {
+    res.set("X-Frame-Options", "DENY");
+    res.set("Content-Security-Policy", "frame-ancestors 'none'");
+    res.type("html").send(createHomeHtml({ baseUrl }));
   });
 
   app.get("/claude", (req, res) => {
@@ -852,7 +1335,7 @@ export function createServer({
     }
   });
 
-  for (const name of ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css"]) {
+  for (const name of PUBLIC_ASSETS) {
     app.get(`/${name}`, (req, res, next) => {
       res.set("Cache-Control", "no-cache");
       res.sendFile(name, { root: PUBLIC_DIR }, (err) => {
@@ -887,11 +1370,30 @@ export function createServer({
     } catch {
       return rejectUpgrade(socket, 404, "Not Found");
     }
+    if (pathname === "/events/home") {
+      if (closing) return rejectUpgrade(socket, 503, "Service Unavailable");
+      return wss.handleUpgrade(req, socket, head, (ws) => onHomeConnection(ws));
+    }
     const m = pathname.match(/^\/events\/([0-9a-f]{16})$/);
     const session = m && (await store.getSession(m[1]).catch(() => null));
     if (!session) return rejectUpgrade(socket, 404, "Not Found");
     if (closing) return rejectUpgrade(socket, 503, "Service Unavailable");
     wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, session));
+  }
+
+  function onHomeConnection(ws) {
+    homeSockets.add(ws);
+    updateIdle();
+    ws.isAlive = true;
+    ws.on("pong", () => {
+      ws.isAlive = true;
+    });
+    ws.on("error", () => {});
+    ws.on("close", () => {
+      homeSockets.delete(ws);
+      updateIdle();
+    });
+    track(homeSnapshot().then((snap) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(snap)), () => {}));
   }
 
   function onConnection(ws, session) {
@@ -918,7 +1420,7 @@ export function createServer({
   }
 
   function pingAll() {
-    for (const set of sockets.values()) {
+    for (const set of [...sockets.values(), homeSockets]) {
       for (const ws of set) {
         if (!ws.isAlive) {
           ws.terminate();
@@ -961,7 +1463,9 @@ export function createServer({
       for (const g of graces.values()) clearTimeout(g.timer);
       graces.clear();
       for (const poll of activePolls.values()) poll.notify();
+      clearTimeout(homeTimer);
       for (const set of sockets.values()) for (const ws of set) ws.terminate();
+      for (const ws of homeSockets) ws.terminate();
       wss.close();
       await Promise.allSettled([...watchers.values()].map((w) => w.close()));
       watchers.clear();

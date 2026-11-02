@@ -1,0 +1,52 @@
+import { escapeHtml } from "./markdown.js";
+
+/** The dashboard at `/`: features with their four-stage tracker, and loose review sessions. */
+export function createHomeHtml({ baseUrl } = {}) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>see-plan</title>
+<link rel="stylesheet" href="/home.css">
+</head>
+<body data-base-url="${escapeHtml(baseUrl ?? "")}">
+<header id="top">
+  <div>
+    <p class="eyebrow">see-plan</p>
+    <h1>Features and review sessions</h1>
+  </div>
+  <nav><a href="/claude">Claude logs</a> <button id="newFeature" type="button" class="primary">New feature</button></nav>
+</header>
+<p id="status" role="status" aria-live="polite"></p>
+<section aria-labelledby="featuresTitle">
+  <h2 id="featuresTitle">Features</h2>
+  <p class="hint">Each feature runs four stages, each with its own Claude session: Plan → Interrogation → Implementation → Verification. A stage opens when the one before it is approved or skipped.</p>
+  <div id="features"></div>
+</section>
+<section aria-labelledby="sessionsTitle">
+  <h2 id="sessionsTitle">Review sessions</h2>
+  <div id="sessions"></div>
+</section>
+<dialog id="featureDialog" aria-labelledby="featureDialogTitle">
+  <form id="featureForm" method="dialog">
+    <h2 id="featureDialogTitle">New feature</h2>
+    <label for="featureName">Name <span class="hint">(letters, digits, dash; becomes the file prefix)</span></label>
+    <input id="featureName" name="name" required pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" autocomplete="off" spellcheck="false">
+    <label for="featureDir">Folder <span class="hint">(absolute path; the plan files are written here)</span></label>
+    <input id="featureDir" name="dir" required autocomplete="off" spellcheck="false">
+    <label for="featureRequirements">Requirements</label>
+    <textarea id="featureRequirements" name="requirements" rows="8" required placeholder="What should this feature do? One requirement per line works well."></textarea>
+    <label class="check"><input id="featureClaude" type="checkbox" checked> Start Claude for the Plan stage now</label>
+    <p id="featureError" class="error" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="featureCancel">Cancel</button>
+      <button type="submit" id="featureCreate" class="primary">Create feature</button>
+    </div>
+  </form>
+</dialog>
+<script src="/home-client.js"></script>
+</body>
+</html>
+`;
+}

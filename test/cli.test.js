@@ -263,13 +263,14 @@ test("poll --claude-session rejects a bad id", async (t) => {
 
 const logPrompt = { prompt: "Add this Claude log entry", tag: "claude-log", target: { entry: { text: "boom" } } };
 
-test("poll next_step tells the agent where claude-log entries go", () => {
+test("poll next_step for claude-log prompts no longer asks the agent to write files", () => {
   const home = path.join("C:", "Users", "me");
   const log = path.join(home, "claude-errors", "error-log.json");
   const only = createPollOutput({ file: "f.html", home, response: { status: "feedback", prompts: [logPrompt] } });
   assert.ok(only.next_step.includes(`\`${log}\``));
   assert.match(only.next_step, /One prompt is tagged `claude-log`/);
-  assert.match(only.next_step, /`target\.entry`.*`reported_at`/);
+  assert.match(only.next_step, /already wrote them/);
+  assert.match(only.next_step, /do not write that file yourself/);
   assert.match(only.next_step, /Then poll again with `see-plan poll f\.html --agent-reply/);
   assert.doesNotMatch(only.next_step, /Apply/);
 
@@ -383,4 +384,44 @@ test("HOME_USAGE lists every flag", () => {
     if (flag === "-h") continue;
     assert.ok(HOME_USAGE.includes(flag), flag);
   }
+});
+
+test("status, stage, feature, and prune commands", async (t) => {
+  const { dir, env } = await mdEnv(t);
+  const file = path.join(dir, "auth-interrogation.html");
+  await fs.promises.writeFile(file, "<html><body>q</body></html>");
+  const json = async (args) => {
+    const io = fakeIo(env);
+    const code = await run([...args, "--json"], io.io);
+    return { code, out: JSON.parse(io.stdout()) };
+  };
+  assert.equal((await json(["open", file])).code, 0);
+  const st = await json(["status", file]);
+  assert.deepEqual([st.out.session.status, st.out.session.stage, st.out.session.stage_source, st.out.session.queued_prompts], ["open", "interrogation", "path", 0]);
+  assert.match(st.out.next_step, /see-plan poll/);
+  const set = await json(["stage", file, "verification"]);
+  assert.deepEqual([set.out.session.stage, set.out.session.stage_source], ["verification", "flag"]);
+  assert.equal((await json(["stage", file, "bogus"])).code, 1);
+  assert.equal((await json(["stage", file])).out.session.stage, "verification");
+
+  const reqs = path.join(dir, "reqs.md");
+  await fs.promises.writeFile(reqs, "Users can log in.");
+  const started = await json(["feature", "start", "login", "--requirements", reqs, "--dir", dir]);
+  assert.equal(started.code, 0, JSON.stringify(started.out));
+  assert.equal(started.out.feature.current, "plan");
+  assert.deepEqual(started.out.feature.stages.map((s) => s.status), ["current", "locked", "locked", "locked"]);
+  assert.match(started.out.next_step, /--stage plan/);
+  const fs1 = await json(["feature", "status", "login"]);
+  assert.match(fs1.out.next_step, /Current stage: Plan/);
+  assert.equal((await json(["feature", "status", "nope"])).code, 1);
+
+  await fs.promises.rm(file);
+  const dry = await json(["prune", "--dry-run"]);
+  assert.deepEqual(dry.out.removed.map((f) => path.basename(f)), ["auth-interrogation.html"]);
+  assert.equal((await json(["prune"])).out.removed.length, 1);
+  assert.equal((await json(["status", file])).code, 1);
+
+  const help = fakeIo(env);
+  await run(["--help"], help.io);
+  for (const cmd of ["status", "stage", "feature", "prune"]) assert.ok(help.stdout().includes(`see-plan ${cmd}`), cmd);
 });

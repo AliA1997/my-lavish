@@ -10,7 +10,9 @@ import { isClaudeSessionId } from "./claude-launcher.js";
 import { ensurePlanHtml, generatedSourceFor, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
 import { SessionStore, sessionKey } from "./session-store.js";
 import { createServer } from "./server.js";
+import { openUrl } from "./open-url.js";
 import { DESIGN_TEXT, PLAYBOOKS, HOME_USAGE } from "./guidance.js";
+import { CATEGORY_TITLES, STAGES, STAGE_TITLES, isStage, stageStep } from "./stages.js";
 
 const APP = "my-lavish-axi";
 export const CMD = "see-plan";
@@ -79,26 +81,48 @@ export function createUserEndedOutput({ file }) {
   };
 }
 
-/** Prompts tagged claude-log are Claude log entries the user clicked in the panel. */
+/** Prompts tagged claude-log are Claude log entries the user picked in the panel, with the user's note. */
 function errorLogStep(count, home) {
   const log = path.join(home, "claude-errors", "error-log.json");
-  return `${count === 1 ? "One prompt is" : `${count} prompts are`} tagged \`claude-log\`: Claude log entries the user flagged. ` +
-    `Append each one's \`target.entry\`, plus a \`reported_at\` ISO timestamp, to the JSON array in \`${log}\` ` +
-    "(create the folder, and the file as `[]`, if missing; keep the records already there). ";
+  return `${count === 1 ? "One prompt is" : `${count} prompts are`} tagged \`claude-log\`: Claude log entries the user flagged, with their note. ` +
+    `If the user chose to log them as errors, see-plan already wrote them to \`${log}\`; do not write that file yourself. Address the user's note. `;
 }
+
+function sessionFeedbackStep(prompts) {
+  const fb = prompts.filter((p) => p?.tag === "session-feedback");
+  if (!fb.length) return "";
+  const last = fb.at(-1).target ?? {};
+  const cats = (last.categories ?? []).map((c) => CATEGORY_TITLES[c] ?? c);
+  return `The user rated this session ${last.rating === "up" ? "👍" : "👎"}${cats.length ? ` (categories: ${cats.join(", ")})` : ""}. ` +
+    "Adjust how you work. Acknowledge it in your reply. ";
+}
+
+const INFO_TAGS = new Set(["claude-log", "session-feedback", "decision"]);
 
 export function createPollOutput({ file, response, home = os.homedir() }) {
   const markdown = isMarkdownPath(file);
-  const status = response.status;
+  const approved = response.ended_by === "approved";
+  const status = approved ? "approved" : response.status;
   const out = { session: { file, status } };
   if (response.ended_by) out.session.ended_by = response.ended_by;
   if (response.session_ended) out.session.session_ended = true;
+  if (response.stage) Object.assign(out.session, { stage: response.stage, stage_source: response.stage_source ?? null });
+  if (response.workflow) out.session.workflow = response.workflow;
   if (response.prompts) out.prompts = response.prompts;
-  if (status === "feedback") {
+  const inWorkflow = Boolean(response.workflow);
+  if (approved) {
+    const prompts = response.prompts ?? [];
+    const others = prompts.filter((p) => !INFO_TAGS.has(p?.tag)).length;
+    const what = STAGE_TITLES[response.stage]?.toLowerCase() ?? "plan";
+    out.next_step = `The user approved this ${what}. ${others ? `First apply the ${others} other prompt(s). ` : ""}Stop polling and report done in chat.` +
+      (inWorkflow ? " The human starts the next stage from the page; do not start it yourself." : "");
+  } else if (status === "feedback") {
     const prompts = response.prompts ?? [];
     const logged = prompts.filter((p) => p?.tag === "claude-log").length;
-    const logStep = logged ? errorLogStep(logged, home) : "";
-    const edits = prompts.length > logged;
+    const decision = prompts.find((p) => p?.tag === "decision" && p.target?.decision === "request-changes");
+    const logStep = (decision ? "The user requested changes: address the `decision` prompt first. " : "") +
+      sessionFeedbackStep(prompts) + (logged ? errorLogStep(logged, home) : "");
+    const edits = prompts.some((p) => !INFO_TAGS.has(p?.tag)) || Boolean(decision);
     const which = logged ? "the other prompts" : "each prompt";
     const again = `poll again with \`${POLL_CMD(file)} --agent-reply "<short summary>"\``;
     out.next_step = response.session_ended
@@ -108,6 +132,8 @@ export function createPollOutput({ file, response, home = os.homedir() }) {
         : markdown
           ? `Apply ${which} to \`${file}\` (the HTML is generated from it; \`selector\` refers to the rendered page), then ${again}.`
           : `Apply ${which} to the HTML file in place (\`selector\` says where), then ${again}.`);
+    const extra = stageStep(response.stage, { planFile: response.workflow?.plan_file });
+    if (extra && !response.session_ended) out.next_step += ` ${extra}`;
   } else if (status === "ended") {
     out.next_step = "The session is ended. Stop polling and do not reopen it unless the user asks.";
   } else if (status === "waiting") {
@@ -255,8 +281,8 @@ export async function ensureServer(env) {
 
 // ---------- argument parsing ----------
 
-export const VALUE_FLAGS = new Set(["--agent-reply", "--agent-reply-file", "--timeout-ms", "--claude-session"]);
-export const BOOL_FLAGS = new Set(["--json", "--no-open", "--reopen", "--with-claude", "--agent", "--help", "-h", "--version"]);
+export const VALUE_FLAGS = new Set(["--agent-reply", "--agent-reply-file", "--timeout-ms", "--claude-session", "--stage", "--requirements", "--dir"]);
+export const BOOL_FLAGS = new Set(["--json", "--no-open", "--reopen", "--with-claude", "--agent", "--dry-run", "--help", "-h", "--version"]);
 
 function parseArgs(argv) {
   const flags = {};
@@ -315,6 +341,14 @@ async function fileContext(file, { regenerate = false } = {}) {
   return out;
 }
 
+function stageOf(flags) {
+  const stage = flags["--stage"];
+  if (stage !== undefined && !isStage(stage)) {
+    throw new CliError("VALIDATION_ERROR", `--stage must be one of ${STAGES.join(", ")}`, "Pass a valid stage, or omit the flag.");
+  }
+  return stage;
+}
+
 function claudeSessionOf(flags) {
   const id = flags["--claude-session"];
   if (id !== undefined && !isClaudeSessionId(id)) {
@@ -341,6 +375,8 @@ async function cmdOpen(file, flags, io) {
   file = ctx.display;
   const baseUrl = await ensureServer(io.env);
   const body = { file: ctx.real, reopen: Boolean(flags["--reopen"]) };
+  const stage = stageOf(flags);
+  if (stage) body.stage = stage;
   if (ctx.source) body.source_file = ctx.source;
   const res = await api(baseUrl, "POST", "/api/sessions", { body });
   if (res.status !== 200) throw httpError(res, file);
@@ -351,7 +387,7 @@ async function cmdOpen(file, flags, io) {
   const noOpen = flags["--no-open"] || io.env.MY_LAVISH_NO_OPEN === "1";
   if (!noOpen) {
     try {
-      await (await import("open")).default(url);
+      await openUrl(url);
     } catch (e) {
       io.stderr.write(`Could not open a browser: ${e.message}\n`);
       shown = "ready";
@@ -363,7 +399,9 @@ async function cmdOpen(file, flags, io) {
     if (connected.status !== 200) throw httpError(connected, file);
     claudeSessionId = connected.body.claude_session_id;
   }
-  return createOpenOutput({ file, url, status: shown, claudeSessionId, knowsOwnSession: Boolean(claudeSession) || isClaudeSessionId(io.env.CLAUDE_CODE_SESSION_ID) });
+  const out = createOpenOutput({ file, url, status: shown, claudeSessionId, knowsOwnSession: Boolean(claudeSession) || isClaudeSessionId(io.env.CLAUDE_CODE_SESSION_ID) });
+  if (res.body.stage) Object.assign(out.session, { stage: res.body.stage, stage_source: res.body.stage_source });
+  return out;
 }
 
 async function cmdPoll(file, flags, io) {
@@ -373,6 +411,8 @@ async function cmdPoll(file, flags, io) {
   file = ctx.display;
   const reply = await agentReplyOf(flags);
   const body = { file: real, ...pollingAgent(claudeSession, io.env, { agentFlag: Boolean(flags["--agent"]) }) };
+  const stage = stageOf(flags);
+  if (stage) body.stage = stage;
   if (reply !== undefined) body.agent_reply = reply;
   if (flags["--timeout-ms"] !== undefined) {
     const n = Number(flags["--timeout-ms"]);
@@ -436,6 +476,120 @@ async function cmdEnd(file, io) {
   };
 }
 
+async function cmdStatus(file, io) {
+  const ctx = await fileContext(file);
+  const baseUrl = await ensureServer(io.env);
+  const res = await api(baseUrl, "GET", `/api/${ctx.key}/status`, { timeoutMs: 10000 });
+  if (res.status !== 200) throw httpError(res, ctx.display);
+  const session = { ...res.body.session, file: ctx.display };
+  const step = session.status === "ended"
+    ? "The session is ended; do not poll unless the user asks to reopen it."
+    : session.listening
+      ? "A poll is already listening for this session; do not start another."
+      : `Run \`${POLL_CMD(ctx.display)}\` to wait for feedback${session.queued_prompts ? ` (${session.queued_prompts} note(s) are waiting)` : ""}.`;
+  return { session, next_step: step };
+}
+
+async function cmdStage(file, name, io) {
+  const ctx = await fileContext(file);
+  const baseUrl = await ensureServer(io.env);
+  if (name === undefined) {
+    const res = await api(baseUrl, "GET", `/api/${ctx.key}/status`, { timeoutMs: 10000 });
+    if (res.status !== 200) throw httpError(res, ctx.display);
+    const { stage, stage_source } = res.body.session;
+    return { session: { file: ctx.display, stage, stage_source }, next_step: stage ? `This session is labeled ${STAGE_TITLES[stage]}.` : `No stage label. Set one with \`see-plan stage ${shellQuote(ctx.display)} <${STAGES.join("|")}>\`.` };
+  }
+  const stage = name === "none" ? null : name;
+  if (stage !== null && !isStage(stage)) {
+    throw new CliError("VALIDATION_ERROR", `Unknown stage "${name}"`, `Use one of ${STAGES.join(", ")}, or none.`);
+  }
+  const res = await api(baseUrl, "POST", `/api/${ctx.key}/stage`, { body: { stage }, timeoutMs: 10000 });
+  if (res.status !== 200) throw httpError(res, ctx.display);
+  return {
+    session: { file: ctx.display, stage: res.body.stage, stage_source: res.body.stage_source },
+    next_step: res.body.changed ? "Stage label saved." : "The label was not changed (a label the human set is kept).",
+  };
+}
+
+async function readRequirements(value) {
+  if (value === undefined) throw new CliError("VALIDATION_ERROR", "feature start needs --requirements <file|->", "Pass the requirements file, or - to read them from stdin.");
+  try {
+    return value === "-" ? await readStdin() : await fs.promises.readFile(value, "utf8");
+  } catch (e) {
+    throw new CliError("VALIDATION_ERROR", `Cannot read requirements ${value}: ${e.message}`, "Check the path and retry.");
+  }
+}
+
+function featureNextStep(wf) {
+  if (!wf.current) return "Every stage is finished. Report the result in chat.";
+  const title = STAGE_TITLES[wf.current];
+  return `Current stage: ${title}. The human advances stages from the page (Approve or Skip); do not start the next stage yourself.`;
+}
+
+const featureView = (wf) => ({
+  id: wf.id,
+  name: wf.name,
+  dir: wf.dir,
+  current: wf.current,
+  stages: STAGES.map((s) => ({ stage: s, status: wf.stages[s].status, ...(wf.stages[s].claude_session_id ? { claude_session_id: wf.stages[s].claude_session_id } : {}) })),
+});
+
+async function cmdFeature(sub, name, flags, io) {
+  const baseUrl = await ensureServer(io.env);
+  if (sub === "start") {
+    if (!name) throw new CliError("VALIDATION_ERROR", "feature start needs a name", "Run `see-plan feature start <name> --requirements <file|->`.");
+    const requirements = await readRequirements(flags["--requirements"]);
+    const dir = path.resolve(flags["--dir"] ?? process.cwd());
+    const res = await api(baseUrl, "POST", "/api/workflows", { body: { name, dir, requirements }, timeoutMs: 15000 });
+    if (res.status !== 200) throw httpError(res, name);
+    const { workflow, url, key } = res.body;
+    const noOpen = flags["--no-open"] || io.env.MY_LAVISH_NO_OPEN === "1";
+    if (!noOpen) {
+      try {
+        await openUrl(url);
+      } catch (e) {
+        io.stderr.write(`Could not open a browser: ${e.message}\n`);
+      }
+    }
+    let claudeSessionId;
+    if (flags["--with-claude"]) {
+      const connected = await api(baseUrl, "POST", `/api/${key}/connect-claude`, { body: {}, timeoutMs: 15000 });
+      if (connected.status !== 200) throw httpError(connected, name);
+      claudeSessionId = connected.body.claude_session_id;
+    }
+    return {
+      feature: { ...featureView(workflow), url, ...(claudeSessionId ? { claude_session_id: claudeSessionId } : {}) },
+      next_step: claudeSessionId
+        ? "Claude was started for the Plan stage and will write the plan; do not poll from here."
+        : `The Plan stage is open at ${url}. Write the plan to ${workflow.dir}${path.sep}${workflow.name}.plan.md from the requirements, then run \`see-plan poll ${shellQuote(path.join(workflow.dir, `${workflow.name}.plan.md`))} --stage plan\`. Do not start the next stage yourself.`,
+    };
+  }
+  if (sub === "status") {
+    if (!name) throw new CliError("VALIDATION_ERROR", "feature status needs a name", "Run `see-plan feature status <name>`.");
+    const res = await api(baseUrl, "GET", "/api/workflows", { timeoutMs: 10000 });
+    if (res.status !== 200) throw httpError(res, name);
+    const wf = res.body.workflows.filter((w) => w.name === name || w.id === name).at(-1);
+    if (!wf) throw new CliError("NOT_FOUND", `No feature "${name}"`, "Start one with `see-plan feature start <name> --requirements <file|->`.");
+    return { feature: featureView(wf), next_step: featureNextStep(wf) };
+  }
+  throw new CliError("VALIDATION_ERROR", `Unknown feature command: ${sub ?? "(none)"}`, "Use `see-plan feature start <name>` or `see-plan feature status <name>`.");
+}
+
+async function cmdPrune(flags, io) {
+  const baseUrl = await ensureServer(io.env);
+  const dryRun = Boolean(flags["--dry-run"]);
+  const res = await api(baseUrl, "POST", "/api/prune", { body: { dry_run: dryRun }, timeoutMs: 15000 });
+  if (res.status !== 200) throw httpError(res, "");
+  const removed = res.body.removed.map((r) => r.file);
+  return {
+    removed,
+    dry_run: dryRun,
+    next_step: removed.length
+      ? dryRun ? "These sessions would be removed. Run `see-plan prune` without --dry-run to remove them." : "Removed sessions whose file no longer exists."
+      : "Nothing to prune.",
+  };
+}
+
 async function cmdStop(io) {
   const { port } = configOf(io.env);
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -478,7 +632,7 @@ async function openLogsPage(flags, io) {
   const url = `${await ensureServer(io.env)}/claude`;
   if (flags["--no-open"] || io.env.MY_LAVISH_NO_OPEN === "1") return { url, opened: false };
   try {
-    await (await import("open")).default(url);
+    await openUrl(url);
     return { url, opened: true };
   } catch (e) {
     io.stderr.write(`Could not open a browser: ${e.message}
@@ -507,7 +661,7 @@ async function cmdHome(flags, io) {
   let logsUrl;
   if (io.stdout.isTTY) {
     try {
-      logsUrl = (await openLogsPage(flags, io)).url;
+      logsUrl = (await openLogsPage({ ...flags, "--no-open": true }, io)).url;
     } catch (e) {
       io.stderr.write(`Could not open the Claude log page: ${e.message}
 `);
@@ -554,6 +708,10 @@ export async function run(argv, io = { stdout: process.stdout, stderr: process.s
     else if (first === "poll") result = await cmdPoll(second, flags, io);
     else if (first === "reply") result = await cmdReply(second, flags, io);
     else if (first === "end") result = await cmdEnd(second, io);
+    else if (first === "status") result = await cmdStatus(second, io);
+    else if (first === "stage") result = await cmdStage(second, positional[2], io);
+    else if (first === "feature") result = await cmdFeature(second, positional[2], flags, io);
+    else if (first === "prune") result = await cmdPrune(flags, io);
     else if (first === "stop") result = await cmdStop(io);
     else if (first === "logs") result = await cmdLogs(flags, io);
     else if (first === "server") result = await cmdServer(io);

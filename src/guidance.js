@@ -70,6 +70,42 @@ export const PLAYBOOKS = [
       "Submit calls window.lavish.queuePrompt(JSON.stringify(answers)) with one object of all answers.",
     ].join("\n"),
   },
+  {
+    id: "interrogation",
+    use_when: "Interrogation stage: grilling a plan before it is built",
+    guidance: [
+      "Read the plan and the requirements first; find gaps, risks, contradictions and unstated assumptions.",
+      "Ask each question as a numbered item in its own block marked data-lavish-question.",
+      "Give every question a recommended answer and one line on why, so the human can just agree.",
+      "Group questions by topic (scope, data, security, performance, UX, rollout); most important first.",
+      "Use the input playbook's controls (radio for the recommendation vs. alternatives, plus a free-text field) and one Submit button.",
+      "After the human answers, update the plan file itself, then poll again; never start implementing.",
+    ].join("\n"),
+  },
+  {
+    id: "progress",
+    use_when: "Implementation stage: showing the plan's tasks with live status",
+    guidance: [
+      "List every task from the plan in order, each with a status: todo, in progress, done, or blocked.",
+      "Give each task a unique id so the human can annotate it.",
+      "Under each done task, link or name the files changed and the test that proves it.",
+      "Put blockers at the top with what you need from the human.",
+      "Update the page after each task; it live-reloads, and changed blocks are highlighted.",
+      "End with a short summary line: N of M tasks done.",
+    ].join("\n"),
+  },
+  {
+    id: "verification",
+    use_when: "Verification stage: checking the build against the requirements",
+    guidance: [
+      "Make a table: one row per acceptance criterion from the requirements and plan.",
+      "Columns: criterion, how it was checked, result (pass or fail), evidence (command output, screenshot, file:line).",
+      "Run the test suite and paste the summary lines (pass and fail counts) verbatim.",
+      "Mark failures clearly and say what would fix them, but do not fix code in this stage.",
+      "End with an overall verdict and the decision you need: Accept, or send back to Implementation.",
+      "Never claim a check passed unless you ran it in this session.",
+    ].join("\n"),
+  },
 ];
 
 export const HOME_USAGE = [
@@ -83,7 +119,7 @@ export const HOME_USAGE = [
   "see-plan feature status <name>  stages, current stage, next_step",
   "see-plan prune                remove sessions whose file is gone (--dry-run)",
   "see-plan design               page design rules",
-  "see-plan playbook [id]        page recipes: plan, diagram, table, comparison, input",
+  "see-plan playbook [id]        page recipes: plan, diagram, table, comparison, input, interrogation, progress, verification",
   "see-plan logs                 open the newest Claude session's log in the browser",
   "see-plan stop                 stop the local server",
   "flags: --json, --no-open, --reopen, --with-claude, --agent, --stage <name>, --claude-session <id>, --timeout-ms <ms>, --agent-reply <text>, --agent-reply-file <file|->, --requirements <file|->, --dir <dir>, --dry-run, --version, --help",

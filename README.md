@@ -14,20 +14,38 @@ This is a small re-implementation of the core loop of [lavish-axi](https://githu
 
 ## Running the project
 
-### Requirements
-
-- Node.js 22 or newer (`node --version`)
-- npm
-- A browser (only needed for the human side; use `--no-open` to skip launching it)
-
 ### Install
+
+**1. One-line installer (recommended)** — downloads the latest release, checks its SHA-256, installs to `~/.see-plan/bin`, and puts it on your PATH. No Node.js needed.
+
+```powershell
+# Windows (PowerShell)
+irm https://github.com/AliA1997/my-lavish/releases/latest/download/install.ps1 | iex
+```
+
+```sh
+# macOS / Linux
+curl -fsSL https://github.com/AliA1997/my-lavish/releases/latest/download/install.sh | sh
+```
+
+To also install the Claude Code skill (`~/.claude/skills/my-lavish`): set `$env:SEE_PLAN_INSTALL_SKILL = "1"` before the PowerShell line, or append `-s -- --install-skill` to `sh`. Open a new terminal, then run `see-plan --version`.
+
+**2. Manual download** — grab `see-plan-<platform>.zip|tar.gz` from [Releases](https://github.com/AliA1997/my-lavish/releases), check it against `SHA256SUMS`, and put `see-plan` on your PATH. Builds: Windows x64, Linux x64, macOS arm64, macOS x64.
+
+> **Windows SmartScreen:** the executable is not code-signed yet, so Windows may warn "Windows protected your PC" the first time. Choose **More info → Run anyway**, or install with npm instead. macOS builds are ad-hoc signed; if Gatekeeper blocks one, run `xattr -d com.apple.quarantine ~/.see-plan/bin/see-plan`.
+
+**3. npm** (needs Node.js 22+): `npm install -g github:AliA1997/my-lavish`
+
+**4. From source** (needs Node.js 22+ and npm):
 
 ```
 npm install
-npm unlink -g my-lavish-axi; npm link   # puts `see-plan` on your PATH (the command was renamed)
+npm link        # puts `see-plan` on your PATH; or run `node bin/see-plan.js <args>`
 ```
 
-`npm link` now puts `see-plan` (not `my-lavish-axi`) on your PATH. Without it, run it directly: `node bin/see-plan.js <args>`.
+Upgrading from 0.1: the command was renamed, so run `npm unlink -g my-lavish-axi` once.
+
+A browser is needed only for the human side; use `--no-open` to skip launching it.
 
 ### Quick start
 
@@ -71,13 +89,33 @@ Finish with `see-plan end examples/plan.html`, and `see-plan stop` to shut down 
 
 ### Use it from an agent
 
-Copy `skills/my-lavish/` into your agent's skills folder (for Claude Code: `~/.claude/skills/my-lavish/`). The skill tells the agent to read `see-plan --help`, `design`, and `playbook <id>` for current instructions.
+Copy `skills/my-lavish/` into your agent's skills folder (for Claude Code: `~/.claude/skills/my-lavish/`). The installers do this with `-InstallSkill` / `--install-skill`. The skill tells the agent how to poll (and re-poll every 1:50), to follow each `next_step`, and how the four stages work.
+
+### Run a feature through four stages
+
+```
+see-plan feature start export-csv --requirements reqs.md --with-claude
+```
+
+This writes `export-csv.requirements.md` and a placeholder `export-csv.plan.md`, opens the Plan stage, and starts Claude to write the plan. Each stage has its own page and its own fresh Claude session:
+
+| Stage | Page you review | Claude's job | Done when |
+| --- | --- | --- | --- |
+| Plan | `<name>.plan.md` | Write the plan from the requirements | You press **Approve plan** |
+| Interrogation | `<name>.interrogation.html` | Ask numbered questions with recommended answers, then update the plan | You approve |
+| Implementation | `<name>.progress.html` | Build task by task, keeping the progress page current | You approve |
+| Verification | `<name>.verification.html` | Check each criterion with evidence; no fixes | You press **Accept**, or **Request changes** to send it back to Implementation |
+
+After an approval, the panel shows **Start <next stage> →**: one click opens the next page and launches a fresh Claude for it. **Skip to next stage** moves on without approval. The dashboard at `http://127.0.0.1:4388/` (or **New feature** there) shows every feature's progress.
 
 ### Tests
 
 ```
-npm test         # unit tests
-npm run smoke    # full loop against a throwaway server; prints SMOKE OK
+npm test                # unit tests
+npm run smoke           # full loop against a throwaway server; prints SMOKE OK
+npm run smoke:workflow  # all four stages with a fake Claude; prints WORKFLOW SMOKE OK
+npm run build:sea       # builds dist/see-plan[.exe], a standalone executable
+npm run smoke:bin       # the full loop against that executable
 ```
 
 ## How it works
@@ -106,19 +144,24 @@ One background server is started on demand and reused by later commands. A sessi
 
 | Command | What it does |
 | --- | --- |
-| `see-plan` | Lists known sessions and usage. Run in a terminal, it also opens the Claude log page (agents, which run without a terminal, only get the text) |
+| `see-plan` | Lists known sessions and usage. Run in a terminal, it also prints the Claude log page URL (it never opens a browser) |
 | `see-plan <file.html|file.md>` / `open <file>` | A `.md` plan is converted to a sibling `.html` (regenerated when the `.md` is newer, never over a hand-written `.html`); agents edit the `.md`. Opens (or reopens) the session and the browser. A session the user ended is refused unless `--reopen` is given |
 | `poll <file>` | Blocks until the user sends feedback or ends the session; prints prompts, `next_step`, and a DOM snapshot |
 | `poll <file> --agent-reply "<text>"` | Posts a reply to the chat, then polls |
 | `reply <file> --agent-reply "<text>"` | Posts a reply without polling |
 | `end <file>` | Ends the session |
+| `status <file>` | Read-only: status, stage, whether an agent is listening, queued notes. Never takes feedback |
+| `stage <file> [name]` | Reads or sets the stage label (`plan`, `interrogation`, `implementation`, `verification`, `none`) |
+| `feature start <name> --requirements <file\|->` | Starts a four-stage feature in `--dir` (default: the current folder) |
+| `feature status <name>` | The feature's stages and current stage |
+| `prune` | Removes sessions whose file no longer exists (`--dry-run` lists them) |
 | `logs` | Opens the Claude log page (newest Claude session's log) in the browser; with `--no-open`, prints its URL |
 | `stop` | Stops the background server |
 | `design` | Prints the design rules for artifacts |
-| `playbook [id]` | Lists playbooks, or prints one (`plan`, `diagram`, `table`, `comparison`, `input`) |
+| `playbook [id]` | Lists playbooks, or prints one (`plan`, `diagram`, `table`, `comparison`, `input`, `interrogation`, `progress`, `verification`) |
 | `server` | Runs the server in the foreground (normally started automatically) |
 
-Flags: `--json` (JSON instead of TOON text), `--no-open` (do not launch a browser), `--reopen`, `--with-claude` (on open: also start Claude in a PowerShell window), `--claude-session <uuid>` (on open/poll: tell the panel which Claude session to show; inside Claude Code, poll fills it in on its own), `--agent-reply <text>`, `--agent-reply-file <path|->`, `--timeout-ms <n>` (poll returns `waiting` after this long), `--help`, `--version`.
+Flags: `--json` (JSON instead of TOON text), `--no-open` (do not launch a browser), `--reopen`, `--with-claude` (on open or feature start: also start Claude in a new terminal), `--stage <name>` (on open/poll: label the stage), `--agent` (poll as an agent outside Claude Code: 1:50 cycles), `--claude-session <uuid>` (on open/poll: tell the panel which Claude session to show; inside Claude Code, poll fills it in on its own), `--agent-reply <text>`, `--agent-reply-file <path|->`, `--timeout-ms <n>` (poll returns `waiting` after this long), `--help`, `--version`.
 
 Every output includes a `next_step` telling the agent what to do next.
 
@@ -126,13 +169,16 @@ Every output includes a `next_step` telling the agent what to do next.
 
 ## Working with Claude from the page
 
-- **Start new session** appears in the panel after a session ends. It keeps the same file, clears the chat, and keeps any feedback the agent has not collected yet.
-- **Connect Claude** (shown while no agent is polling) opens PowerShell, starts `claude --session-id <uuid>` in the plan's repo root, and tells it to run `see-plan poll`. `see-plan <file> --with-claude` does the same from the command line. Windows only; needs the native `claude.exe` on PATH. Permission prompts are Claude's own; see-plan never passes a permission-bypass flag.
-- **Agent status** at the top of the panel says when an agent is connected: "Claude agent connected — waiting for your feedback" while its poll waits, and "… is working on your feedback" after it takes your notes and before it polls again. `see-plan poll` recognizes Claude Code from the `CLAUDECODE` and `CLAUDE_CODE_SESSION_ID` variables Claude Code sets, so no flag is needed.
+- **Connection card** at the top of the panel shows one state at a time: *No agent connected* (with **Connect Claude**, **Resume last session** when there is an earlier Claude conversation, and *How do I connect manually?*), *Starting Claude… 0:12* (with **Cancel**), *connected — waiting for your feedback*, *working on your feedback*, *stuck* (no poll after 45 s: check the Claude window for a folder-trust, login, or permission prompt; **Copy allow-rule** copies `"Bash(see-plan:*)"` for `.claude/settings.json`), and *unsupported* (a command to paste). Hover the connected card to see the last check-in.
+- **Connect Claude** opens a terminal in the plan's repo root and starts `claude --session-id <uuid>` with a labeled prompt (`[see-plan · <feature> · <Stage>] …`). Windows uses PowerShell (needs the native `claude.exe`), macOS uses Terminal, Linux uses the first of x-terminal-emulator, gnome-terminal, konsole, xterm. If none is available, the card shows the command to paste. Paths and prompts never go through a shell string. see-plan never passes a permission-bypass flag.
+- **Session feedback** (on the card): 👍/👎, categories (*Wrong direction*, *Too slow*, *Broke something*, *Ignored my notes*, *Great job*) and a note. It reaches the agent on its next poll and is logged to `feedback.jsonl` in the state directory.
+- **Approve / Request changes** sit above the composer for plans and staged sessions. Approve ends the session as *approved* (and, in a feature, opens the next stage). **⋯ More** holds *Comment on the whole plan*, *Send & End* and *End session*; ending asks first. After a session ends, **Resume (keep history)** reopens it and **Start fresh** clears the chat (earlier rounds stay under *Previous rounds*).
+- **Revision rN ▾** lists the last 20 versions of the page; pick one to view it read-only. After each reload the blocks that changed are outlined for 10 s.
+- **Stage menu** in the header labels the session. A label inferred from your words or the file name shows *(inferred) · Confirm*; inference never overrides a label you or the agent set.
 - **Claude log** tab shows that session's transcript (`~/.claude/projects/*/<session-id>.jsonl`, or `$CLAUDE_CONFIG_DIR`). A Claude agent's poll attaches its own session when none is attached yet (it never replaces one you picked); `--claude-session <uuid>` always sets it. Each refresh reads at most 256 KB and the tab keeps the last 500 entries.
 - With no session attached, or one with no transcript (such as a Connect Claude launch that never started), the tab lists the **20 most recent Claude sessions**, newest first. Each is titled by its `/rename` title or first prompt; built-in commands such as `/clear` or `/model` are skipped. Click one to show its log, or paste an id. **Change session** reopens the list.
-- **Click a log entry** to send it to the agent as a `claude-log` note. The poll's `next_step` tells the agent to append the entry (session id, line `uuid`, part, role, kind, time, text) plus a `reported_at` time to the JSON array in `~/claude-errors/error-log.json`. A sent entry is marked, and clicking it again sends nothing. Select text inside an entry to copy it without sending.
-- **Claude log page** (`/claude`, opened by bare `see-plan` in a terminal or by `see-plan logs`): the newest Claude session's id and last-prompt date on top, its log below, and a **Recent sessions** menu for the other 19. The log loads at least 200 entries when the session has that many (reading up to 16 MB back), then updates live. Add `?id=<uuid>` to the URL to open a given session. No agent is involved here: clicking an entry makes the server append it (session id, line `uuid`, part, role, kind, time, text, `reported_at`) to `~/claude-errors/error-log.json` itself. It creates the file if missing, keeps the records already there, skips an entry that is already logged, and refuses to touch a file that is not a JSON array.
+- **Click a log entry** to open a small note box: **Send to agent** (a `claude-log` note with your text), **Log as error** (the server appends it to `~/claude-errors/error-log.json`), or **Both**. The agent is never asked to write files. A sent entry is marked. Select text inside an entry to copy it instead.
+- **Claude log page** (`/claude`, opened by `see-plan logs`): the newest Claude session's id and last-prompt date on top, its log below, and a **Recent sessions** menu for the other 19. The log loads at least 200 entries when the session has that many (reading up to 16 MB back), then updates live. Add `?id=<uuid>` to the URL to open a given session. No agent is involved here: clicking an entry makes the server append it (session id, line `uuid`, part, role, kind, time, text, `reported_at`) to `~/claude-errors/error-log.json` itself. It creates the file if missing, keeps the records already there, skips an entry that is already logged, and refuses to touch a file that is not a JSON array.
 - Every local process is trusted: the server has no token, so any process on this machine can attach a session id or trigger a launch. Do not run it on a shared machine.
 
 ## Environment variables

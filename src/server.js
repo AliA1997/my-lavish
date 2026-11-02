@@ -3,7 +3,6 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import express from "express";
 import { WebSocketServer } from "ws";
 import { watchArtifact } from "./artifact-watcher.js";
@@ -23,11 +22,11 @@ import {
   requirementsFile, stageFile, updateStage,
 } from "./workflow-store.js";
 import { createHomeHtml } from "./home-page.js";
+import { CONTENT_TYPES, PUBLIC_ASSETS, readAsset } from "./assets.js";
 import { findLastPromptAt, findTranscript, listClaudeSessions, readTranscript } from "./claude-log.js";
 import { buildPrompt, claudeStatus as realClaudeStatus, findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
 
-const PUBLIC_DIR = fileURLToPath(new URL("../public/", import.meta.url));
-export const PUBLIC_ASSETS = ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css"];
+export { PUBLIC_ASSETS };
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const PING_INTERVAL_MS = 30000;
 const CONNECT_COOLDOWN_MS = 60000;
@@ -1338,10 +1337,12 @@ export function createServer({
 
   for (const name of PUBLIC_ASSETS) {
     app.get(`/${name}`, (req, res, next) => {
-      res.set("Cache-Control", "no-cache");
-      res.sendFile(name, { root: PUBLIC_DIR }, (err) => {
-        if (err && !res.headersSent) next(err);
-      });
+      try {
+        res.set("Cache-Control", "no-cache");
+        res.type(CONTENT_TYPES[path.extname(name)] ?? "application/octet-stream").send(readAsset(name));
+      } catch (e) {
+        next(e);
+      }
     });
   }
 

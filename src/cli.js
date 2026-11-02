@@ -3,7 +3,6 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { toToon } from "./toon.js";
 import { assertHtmlFile, canonicalFile } from "./artifact-path.js";
 import { isClaudeSessionId } from "./claude-launcher.js";
@@ -11,13 +10,13 @@ import { ensurePlanHtml, generatedSourceFor, htmlPathFor, isMarkdownPath } from 
 import { SessionStore, sessionKey } from "./session-store.js";
 import { createServer } from "./server.js";
 import { openUrl } from "./open-url.js";
+import { serverSpawnArgs } from "./assets.js";
+import { VERSION } from "./version.js";
 import { DESIGN_TEXT, PLAYBOOKS, HOME_USAGE } from "./guidance.js";
 import { CATEGORY_TITLES, STAGES, STAGE_TITLES, isStage, stageStep } from "./stages.js";
 
 const APP = "my-lavish-axi";
 export const CMD = "see-plan";
-const BIN_PATH = fileURLToPath(new URL("../bin/see-plan.js", import.meta.url));
-const PACKAGE_PATH = fileURLToPath(new URL("../package.json", import.meta.url));
 
 class CliError extends Error {
   constructor(code, message, nextStep) {
@@ -255,7 +254,7 @@ export async function ensureServer(env) {
   const logFd = fs.openSync(path.join(stateDir, "server.log"), "a");
   let child;
   try {
-    child = spawn(process.execPath, [BIN_PATH, "server"], {
+    child = spawn(process.execPath, serverSpawnArgs(), {
       detached: true,
       stdio: ["ignore", logFd, logFd],
       windowsHide: true,
@@ -611,7 +610,7 @@ async function cmdStop(io) {
 async function cmdServer(io) {
   const { port, stateDir, idleTimeoutMs } = configOf(io.env);
   await fs.promises.mkdir(stateDir, { recursive: true });
-  const version = JSON.parse(await fs.promises.readFile(PACKAGE_PATH, "utf8")).version;
+  const version = VERSION;
   const server = createServer({
     store: new SessionStore(stateDir),
     stateDir,
@@ -696,7 +695,7 @@ export async function run(argv, io = { stdout: process.stdout, stderr: process.s
     const { flags, positional } = parseArgs(argv);
     json = Boolean(flags["--json"]);
     if (flags["--version"]) {
-      io.stdout.write(JSON.parse(await fs.promises.readFile(PACKAGE_PATH, "utf8")).version + "\n");
+      io.stdout.write(VERSION + "\n");
       return 0;
     }
     const [first, second] = positional;

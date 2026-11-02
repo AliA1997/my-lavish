@@ -519,7 +519,7 @@ test("connect-claude launches and records the id", async (t) => {
   const body = await res.json();
   assert.match(body.claude_session_id, UUID);
   assert.equal(fake.calls.length, 1);
-  assert.equal(fake.calls[0].file, file);
+  assert.equal(fake.calls[0].file, await fs.promises.realpath(file));
   assert.equal(fake.calls[0].sessionId, body.claude_session_id);
   assert.equal(path.resolve(fake.calls[0].cwd).startsWith(path.resolve(art).slice(0, 3)), true);
   const msg = await waitFor((m) => m.type === "claude-session");

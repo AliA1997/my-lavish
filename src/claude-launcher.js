@@ -37,7 +37,7 @@ const STAGE_TITLES = { plan: "Plan", interrogation: "Interrogation", implementat
 
 /** `[see-plan · <feature> · <Stage>]`: Claude titles sessions by their first prompt, so the label shows in session lists. */
 export function launchLabel({ file, feature, stage }) {
-  const name = feature || path.basename(String(file)).replace(/\.(plan\.)?(md|markdown|html?)$/i, "");
+  const name = feature || String(file).split(/[\\/]/).pop().replace(/\.(plan\.)?(md|markdown|html?)$/i, "");
   return `[see-plan · ${name} · ${STAGE_TITLES[stage] ?? "Review"}]`;
 }
 

@@ -19,7 +19,7 @@ async function setup(t, opts = {}) {
   const file = path.join(art, "a.html");
   await fs.promises.writeFile(file, "<html><body><h1 id=t>hi</h1></body></html>");
   await fs.promises.writeFile(path.join(art, "style.css"), "h1{color:red}");
-  const srv = createServer({ store: new SessionStore(stateDir), stateDir, port: 0, version: "0.1.0", ...opts });
+  const srv = createServer({ store: new SessionStore(stateDir), stateDir, port: 0, version: "0.1.0", presenceGraceMs: 0, ...opts });
   const { port, baseUrl } = await srv.listen();
   t.after(async () => {
     await srv.close();
@@ -519,9 +519,9 @@ test("connect-claude launches and records the id", async (t) => {
   const body = await res.json();
   assert.match(body.claude_session_id, UUID);
   assert.equal(fake.calls.length, 1);
-  assert.equal(fake.calls[0].file, file);
+  assert.equal(fake.calls[0].file, await fs.promises.realpath(file));
   assert.equal(fake.calls[0].sessionId, body.claude_session_id);
-  assert.equal(path.resolve(fake.calls[0].cwd).startsWith(path.resolve(art).slice(0, 3)), true);
+  assert.equal(path.resolve(fake.calls[0].cwd).startsWith(path.resolve(await fs.promises.realpath(art)).slice(0, 3)), true);
   const msg = await waitFor((m) => m.type === "claude-session");
   assert.equal(msg.id, body.claude_session_id);
   const page = await (await fetch(`${baseUrl}/session/${key}`)).text();
@@ -542,7 +542,7 @@ test("connect-claude names the md for markdown sessions", async (t) => {
   assert.equal(fake.calls[0].file, await fs.promises.realpath(md));
 });
 
-test("second connect within 60s is refused", async (t) => {
+test("second connect within 60s is refused for the same session only", async (t) => {
   const fake = fakeLauncher();
   const { art, key, postJson } = await setup(t, { launchClaude: fake.launchClaude });
   const other = path.join(art, "b.html");
@@ -554,9 +554,8 @@ test("second connect within 60s is refused", async (t) => {
   ]);
   assert.deepEqual([first.status, same.status].sort(), [200, 409]);
   const diff = await postJson(`/api/${otherKey}/connect-claude`, {});
-  assert.equal(diff.status, 409);
-  assert.equal((await diff.json()).error.code, "CONNECT_PENDING");
-  assert.equal(fake.calls.length, 1);
+  assert.equal(diff.status, 200, "launch cooldown is per session");
+  assert.equal(fake.calls.length, 2);
 });
 
 test("connect-claude refuses while a poll listens", async (t) => {
@@ -680,4 +679,274 @@ test("claude-session rejects a non-uuid", async (t) => {
   const res = await postJson(`/api/${key}/claude-session`, { id: "../../etc/passwd" });
   assert.equal(res.status, 400);
   assert.equal((await res.json()).error.code, "VALIDATION_ERROR");
+});
+
+test("claude-sessions lists recent transcripts and refuses cross-site loads", async (t) => {
+  const { claudeDir } = await claudeFixture(t);
+  const { baseUrl } = await setup(t, { claudeDir });
+  const body = await (await fetch(`${baseUrl}/api/claude-sessions`)).json();
+  assert.deepEqual(body.sessions.map((s) => [s.id, s.project, s.title]), [[CLAUDE_ID, "C--x", "one"]]);
+  const cross = await fetch(`${baseUrl}/api/claude-sessions`, { headers: { "Sec-Fetch-Site": "cross-site" } });
+  assert.equal(cross.status, 403);
+});
+
+test("presence names a Claude agent and shows it working after it takes feedback", async (t) => {
+  const { key, file, port, postJson, postPrompts } = await setup(t);
+  const { ws, waitFor, messages } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  assert.deepEqual(await waitFor((m) => m.type === "presence"), {
+    type: "presence", listening: false, agent: null, session_id: null, working: false, cycling: false, last_poll_at: null,
+  });
+  const pending = postJson("/api/poll", { file, agent: "claude", claude_session_id: CLAUDE_ID });
+  const listening = await waitFor((m) => m.type === "presence" && m.listening === true);
+  assert.deepEqual([listening.agent, listening.session_id, listening.working], ["claude", CLAUDE_ID, false]);
+  let from = messages.length;
+  await postPrompts(key, { prompts: [note("go")] });
+  assert.equal((await (await pending).json()).status, "feedback");
+  const working = await waitFor((m) => m.type === "presence", 3000, from);
+  assert.deepEqual([working.listening, working.working, working.agent], [false, true, "claude"]);
+
+  from = messages.length;
+  const next = postJson("/api/poll", { file, timeoutMs: 100 });
+  const back = await waitFor((m) => m.type === "presence" && m.listening === true, 3000, from);
+  assert.deepEqual([back.agent, back.working], [null, false], "a new listener replaces the working state");
+  assert.equal((await (await next).json()).status, "waiting");
+});
+
+test("feedback taken without listening still reports the agent working", async (t) => {
+  const { key, file, port, postJson, postPrompts } = await setup(t);
+  await postPrompts(key, { prompts: [note("queued")] });
+  const { ws, waitFor, messages } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  await waitFor((m) => m.type === "presence");
+  const from = messages.length;
+  assert.equal((await (await postJson("/api/poll", { file, agent: "claude" })).json()).status, "feedback");
+  const working = await waitFor((m) => m.type === "presence", 3000, from);
+  assert.deepEqual([working.working, working.agent], [true, "claude"]);
+});
+
+test("poll attaches the agent's own Claude session only when none is set", async (t) => {
+  const { key, file, baseUrl, postJson } = await setup(t);
+  const poll = (id) => postJson("/api/poll", { file, timeoutMs: 50, agent: "claude", claude_session_id: id });
+  assert.equal((await poll(CLAUDE_ID)).status, 200);
+  assert.equal((await bootstrap(baseUrl, key)).claude_session_id, CLAUDE_ID);
+  const picked = "2b4e28ba-2fa1-11d2-883f-0016d3cca427";
+  assert.equal((await postJson(`/api/${key}/claude-session`, { id: picked })).status, 200);
+  assert.equal((await poll(CLAUDE_ID)).status, 200);
+  assert.equal((await bootstrap(baseUrl, key)).claude_session_id, picked, "the user's pick is kept");
+});
+
+test("poll rejects a malformed claude_session_id", async (t) => {
+  const { file, postJson } = await setup(t);
+  const res = await postJson("/api/poll", { file, claude_session_id: "../x" });
+  assert.equal(res.status, 400);
+  assert.equal((await res.json()).error.code, "VALIDATION_ERROR");
+});
+
+test("a claude-log entry reaches the poll without wiping the page snapshot", async (t) => {
+  const { key, postPrompts, poll } = await setup(t);
+  await postPrompts(key, { prompts: [note("blue")], dom_snapshot: "<h1>hi</h1>" });
+  const entry = {
+    prompt_id: "claude-log:u-1:0",
+    prompt: "Add this Claude log entry to ~/claude-errors/error-log.json.",
+    tag: "claude-log",
+    selector: "",
+    text: "",
+    target: {
+      error_log: "~/claude-errors/error-log.json",
+      entry: { claude_session_id: CLAUDE_ID, uuid: "u-1", role: "user", kind: "tool_result", at: "t", text: "boom" },
+    },
+  };
+  const sent = await (await postPrompts(key, { prompts: [entry], dom_snapshot: "" })).json();
+  assert.equal(sent.chat.at(-1).anchor, "Claude log entry");
+  assert.equal(sent.chat.at(-1).prompt_id, "claude-log:u-1:0");
+  const j = await (await poll(2000)).json();
+  assert.equal(j.dom_snapshot, "<h1>hi</h1>");
+  assert.equal(j.prompts.at(-1).target.entry.text, "boom");
+  assert.equal((await (await postPrompts(key, { prompts: [entry] })).json()).accepted, 0, "a resend of the same entry is dropped");
+});
+
+test("ending a session clears the working state", async (t) => {
+  const { key, file, port, baseUrl, postJson, postPrompts } = await setup(t);
+  await postPrompts(key, { prompts: [note("queued")] });
+  assert.equal((await (await postJson("/api/poll", { file, agent: "claude" })).json()).status, "feedback");
+  assert.equal((await postJson(`/api/${key}/end`, {}, { Origin: baseUrl })).status, 200);
+  assert.equal((await postJson("/api/sessions", { file, reopen: true })).status, 200);
+  const { ws, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  const p = await waitFor((m) => m.type === "presence");
+  assert.deepEqual([p.working, p.agent], [false, null]);
+});
+
+async function logPage(t) {
+  const { claudeDir, transcript } = await claudeFixture(t);
+  const errorDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-errlog-"));
+  t.after(() => fs.promises.rm(errorDir, { recursive: true, force: true }));
+  const errorLogFile = path.join(errorDir, "claude-errors", "error-log.json");
+  const ctx = await setup(t, { claudeDir, errorLogFile });
+  const entry = { claude_session_id: CLAUDE_ID, uuid: "u-9", part: 0, role: "user", kind: "text", at: "2026-10-25T23:32:00.000Z", text: "three" };
+  return { ...ctx, transcript, errorLogFile, entry };
+}
+
+test("the Claude log page reads a session by id, with its last prompt time", async (t) => {
+  const { baseUrl, transcript } = await logPage(t);
+  const line = (o) => JSON.stringify(o) + "\n";
+  await fs.promises.appendFile(transcript,
+    line({ type: "user", uuid: "u-9", timestamp: "2026-10-25T23:32:00.000Z", message: { content: "three" } }) +
+    line({ type: "assistant", uuid: "a-1", timestamp: "2026-10-25T23:33:00.000Z", message: { content: [{ type: "text", text: "ok" }] } }));
+  const page = await fetch(`${baseUrl}/claude`);
+  assert.equal(page.status, 200);
+  assert.equal(page.headers.get("x-frame-options"), "DENY");
+  assert.match(await page.text(), /id="sessionId"/);
+
+  const log = await (await fetch(`${baseUrl}/api/claude-sessions/${CLAUDE_ID}/log`)).json();
+  assert.equal(log.found, true);
+  assert.deepEqual(log.entries.map((e) => e.text), ["one", "two", "three", "ok"]);
+  assert.equal(log.last_prompt_at, "2026-10-25T23:32:00.000Z");
+  assert.deepEqual(log.reported, []);
+  const later = await (await fetch(`${baseUrl}/api/claude-sessions/${CLAUDE_ID}/log?after=${log.next}`)).json();
+  assert.deepEqual([later.entries, later.reported], [[], undefined]);
+
+  const unknown = await (await fetch(`${baseUrl}/api/claude-sessions/00000000-0000-4000-8000-000000000000/log`)).json();
+  assert.equal(unknown.found, false);
+  assert.equal((await fetch(`${baseUrl}/api/claude-sessions/not-a-uuid/log`)).status, 400);
+  const cross = await fetch(`${baseUrl}/api/claude-sessions/${CLAUDE_ID}/log`, { headers: { "Sec-Fetch-Site": "cross-site" } });
+  assert.equal(cross.status, 403);
+});
+
+test("a log page click appends the entry to the error log once", async (t) => {
+  const { baseUrl, postJson, errorLogFile, entry } = await logPage(t);
+  const page = { Origin: baseUrl };
+  assert.equal((await postJson("/api/claude-errors", { entry })).status, 403, "only the page may write");
+  const first = await postJson("/api/claude-errors", { entry }, page);
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).duplicate, false);
+  assert.equal((await (await postJson("/api/claude-errors", { entry }, page)).json()).duplicate, true);
+  await postJson("/api/claude-errors", { entry: { ...entry, part: 1, role: "assistant", kind: "tool_use" } }, page);
+
+  const records = JSON.parse(await fs.promises.readFile(errorLogFile, "utf8"));
+  assert.deepEqual(records.map((r) => [r.claude_session_id, r.uuid, r.part, r.text]), [[CLAUDE_ID, "u-9", 0, "three"], [CLAUDE_ID, "u-9", 1, "three"]]);
+  assert.ok(!Number.isNaN(Date.parse(records[0].reported_at)));
+  const log = await (await fetch(`${baseUrl}/api/claude-sessions/${CLAUDE_ID}/log`)).json();
+  assert.deepEqual(log.reported, ["u-9:0", "u-9:1"]);
+
+  for (const bad of [{ ...entry, claude_session_id: "x" }, { ...entry, role: "system" }, { ...entry, part: -1 }, { ...entry, uuid: "" }, { ...entry, text: "x".repeat(20001) }]) {
+    assert.equal((await postJson("/api/claude-errors", { entry: bad }, page)).status, 400);
+  }
+});
+
+test("the error log keeps existing records and is never overwritten when it is not a JSON array", async (t) => {
+  const { baseUrl, postJson, errorLogFile, entry } = await logPage(t);
+  await fs.promises.mkdir(path.dirname(errorLogFile), { recursive: true });
+  await fs.promises.writeFile(errorLogFile, JSON.stringify([{ note: "kept" }]));
+  assert.equal((await postJson("/api/claude-errors", { entry }, { Origin: baseUrl })).status, 200);
+  assert.deepEqual(JSON.parse(await fs.promises.readFile(errorLogFile, "utf8")).map((r) => r.note ?? r.uuid), ["kept", "u-9"]);
+
+  await fs.promises.writeFile(errorLogFile, "{ not json");
+  const res = await postJson("/api/claude-errors", { entry: { ...entry, uuid: "u-10" } }, { Origin: baseUrl });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).error.code, "ERROR_LOG_UNREADABLE");
+  assert.equal(await fs.promises.readFile(errorLogFile, "utf8"), "{ not json");
+});
+
+
+test("agent polls are capped at agentPollMs; non-agent polls are not", async (t) => {
+  const { file, postJson } = await setup(t, { agentPollMs: 150 });
+  const started = Date.now();
+  const j = await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  assert.deepEqual(j, { status: "waiting", reconnect: true });
+  assert.ok(Date.now() - started < 2000);
+  const big = await (await postJson("/api/poll", { file, agent: "claude", timeoutMs: 60000 })).json();
+  assert.equal(big.reconnect, true);
+  const ac = new AbortController();
+  const human = postJson("/api/poll", { file }, {}).catch(() => "aborted");
+  const raced = await Promise.race([human.then(() => "returned"), delay(500).then(() => "still waiting")]);
+  assert.equal(raced, "still waiting");
+  void ac;
+});
+
+test("a reconnect cycle is invisible to the user", async (t) => {
+  const { key, file, port, postJson } = await setup(t, { agentPollMs: 100, presenceGraceMs: 2000 });
+  const first = postJson("/api/poll", { file, agent: "claude" });
+  const { ws, messages, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  await waitFor((m) => m.type === "presence" && m.listening === true);
+  await first;
+  for (let i = 0; i < 2; i++) await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  await delay(100);
+  const all = messages.filter((m) => m.type === "presence");
+  const presences = all.slice(all.findIndex((m) => m.listening === true));
+  assert.ok(presences.length >= 1);
+  assert.ok(presences.every((m) => m.listening === true), JSON.stringify(presences));
+});
+
+test("after the grace period presence says not listening", async (t) => {
+  const { key, file, port, postJson } = await setup(t, { agentPollMs: 50, presenceGraceMs: 200 });
+  const { ws, messages, waitFor } = await connectWs(port, key);
+  t.after(() => ws.terminate());
+  await waitFor((m) => m.type === "presence");
+  const from = messages.length;
+  await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  const off = await waitFor((m) => m.type === "presence" && m.listening === false, 3000, from);
+  assert.ok(off.last_poll_at);
+});
+
+test("a note sent during the gap reaches the next poll; connect is refused while reconnecting", async (t) => {
+  const fake = fakeLauncher();
+  const { key, file, postJson, postPrompts } = await setup(t, { agentPollMs: 50, presenceGraceMs: 5000, launchClaude: fake.launchClaude });
+  await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  const sent = await (await postPrompts(key, { prompts: [note("in the gap")] })).json();
+  assert.equal(sent.delivered, "queued-for-agent");
+  const connect = await postJson(`/api/${key}/connect-claude`, {});
+  assert.equal(connect.status, 409);
+  assert.equal((await connect.json()).error.code, "AGENT_RECONNECTING");
+  assert.equal(fake.calls.length, 0);
+  const j = await (await postJson("/api/poll", { file, agent: "claude" })).json();
+  assert.equal(j.status, "feedback");
+  assert.equal(j.prompts[0].prompt, "in the gap");
+});
+
+test("notes sent with no agent around are only queued", async (t) => {
+  const { key, postPrompts } = await setup(t);
+  assert.equal((await (await postPrompts(key, { prompts: [note("x")] })).json()).delivered, "queued");
+});
+
+test("claude-status reports how Connect Claude would launch", async (t) => {
+  let calls = 0;
+  const status = { platform: "linux", launch: "copy", claude_found: true, claude_path: "/usr/bin/claude" };
+  const { baseUrl } = await setup(t, { claudeStatus: async () => { calls++; return status; } });
+  assert.deepEqual(await (await fetch(`${baseUrl}/api/claude-status`)).json(), status);
+  await fetch(`${baseUrl}/api/claude-status`);
+  assert.equal(calls, 1, "cached per process");
+  assert.equal((await fetch(`${baseUrl}/api/claude-status`, { headers: { "Sec-Fetch-Site": "cross-site" } })).status, 403);
+});
+
+test("connect-claude returns copy mode and the launch prompt carries the label", async (t) => {
+  const calls = [];
+  const { key, postJson, baseUrl } = await setup(t, {
+    launchClaude: async (args) => { calls.push(args); return { mode: "copy", command: "cd x && claude" }; },
+  });
+  const body = await (await postJson(`/api/${key}/connect-claude`, {})).json();
+  assert.deepEqual([body.mode, body.command], ["copy", "cd x && claude"]);
+  assert.ok(calls[0].prompt.startsWith("[see-plan · a · Review]"));
+  assert.match(calls[0].prompt, /1:50/);
+  assert.equal((await postJson(`/api/${key}/connect-claude`, {})).status, 409, "cooldown");
+  assert.equal((await postJson(`/api/${key}/connect-cancel`, {})).status, 403, "cancel needs the page origin");
+  assert.equal((await postJson(`/api/${key}/connect-cancel`, {}, { Origin: baseUrl })).status, 200);
+  assert.equal((await postJson(`/api/${key}/connect-claude`, {})).status, 200, "cancel clears the cooldown");
+});
+
+test("connect-claude resume reuses a session that has a transcript", async (t) => {
+  const { claudeDir } = await claudeFixture(t);
+  const fake = fakeLauncher();
+  const { key, postJson, baseUrl } = await setup(t, { claudeDir, launchClaude: fake.launchClaude });
+  const none = await postJson(`/api/${key}/connect-claude`, { resume: true });
+  assert.equal(none.status, 409);
+  assert.equal((await none.json()).error.code, "NOTHING_TO_RESUME");
+  await postJson(`/api/${key}/claude-session`, { id: CLAUDE_ID });
+  assert.ok((await bootstrap(baseUrl, key)).can_resume);
+  const res = await postJson(`/api/${key}/connect-claude`, { resume: true });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).claude_session_id, CLAUDE_ID);
+  assert.deepEqual([fake.calls[0].resume, fake.calls[0].sessionId], [true, CLAUDE_ID]);
 });

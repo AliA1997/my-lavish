@@ -16,6 +16,9 @@
   --warn-bg: #fff1d6;
   --warn-text: #7a4d00;
   --error: #b3261e;
+  --ok-bg: #e3f1e4;
+  --ok-text: #1f5a2a;
+  --ok-dot: #2e8b45;
   --panel-width: 360px;
 }
 
@@ -35,6 +38,9 @@
     --warn-bg: #3d2f12;
     --warn-text: #f3d08a;
     --error: #f2b8b5;
+    --ok-bg: #1d3322;
+    --ok-text: #b7e1bf;
+    --ok-dot: #5cc476;
   }
 }
 
@@ -90,21 +96,15 @@ body {
   border-left: 1px solid var(--border);
 }
 
-#panel::before {
-  content: "Conversation";
-  display: block;
-  padding: 12px 16px;
-  font-weight: 600;
-  border-bottom: 1px solid var(--border);
+@keyframes agent-pulse {
+  50% { opacity: 0.3; }
 }
 
-#presenceBanner {
-  margin: 10px 12px 0;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--warn-bg);
-  color: var(--warn-text);
-  font-size: 13px;
+@media (prefers-reduced-motion: reduce) {
+  #connection[data-state="working"] .dot,
+  #connection[data-state="starting"] .dot {
+    animation: none;
+  }
 }
 
 #chatLog {
@@ -253,7 +253,7 @@ body {
   position: sticky;
   bottom: 0;
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 8px;
   padding: 12px;
   border-top: 1px solid var(--border);
@@ -261,8 +261,6 @@ body {
 }
 
 #chatInput {
-  flex: 1 1 100%;
-  order: -1;
   min-height: 64px;
   padding: 8px;
   resize: vertical;
@@ -301,9 +299,6 @@ body {
   color: var(--accent);
 }
 
-#composer #endSession {
-  margin-left: auto;
-}
 
 #composer button:disabled,
 #chatInput:disabled {
@@ -312,7 +307,7 @@ body {
 }
 
 #sendHint {
-  flex: 1 1 100%;
+  margin: 0;
   min-height: 1em;
   color: var(--muted);
   font-size: 12px;
@@ -353,52 +348,6 @@ body.ended #sendHint {
   #chatLog {
     max-height: 50vh;
   }
-}
-
-#endedBanner {
-  padding: 8px 12px;
-  background: var(--error, #b3261e);
-  color: #fff;
-  font-weight: 600;
-  text-align: center;
-}
-
-#endedBanner[hidden] {
-  display: none;
-}
-
-#newSession {
-  margin-left: 8px;
-  padding: 2px 10px;
-  font: inherit;
-  font-weight: 600;
-  color: var(--error, #b3261e);
-  background: #fff;
-  border: 0;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-#newSession[hidden] {
-  display: none;
-}
-
-#newSession:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-#connectClaude {
-  margin-left: 6px;
-  padding: 2px 10px;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-#connectClaude:disabled {
-  opacity: 0.6;
-  cursor: default;
 }
 
 #chatLog[hidden],
@@ -455,8 +404,134 @@ body.ended #sendHint {
   opacity: 0.75;
 }
 
-.log-entry {
+/* Sticky so "Change session" stays reachable while the log scrolls; the negative margin covers #claudeLog's padding. */
+#claudeHeader {
+  position: sticky;
+  top: -12px;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: -12px -12px 8px;
+  padding: 12px 12px 8px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+#claudeCurrent {
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+#claudeHeader button {
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.claude-tip {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#claudePicker {
+  margin-bottom: 12px;
+}
+
+.picker-title {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+
+.picker-empty {
+  margin: 0 0 8px;
+  color: var(--muted);
+}
+
+#claudeSessions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   margin-bottom: 8px;
+}
+
+.session-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.session-item:hover,
+.session-item:focus-visible {
+  border-color: var(--accent);
+}
+
+.session-item.current {
+  border-color: var(--accent);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.session-title {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.session-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.log-entry {
+  margin: 0 -6px 4px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.log-entry:hover,
+.log-entry:focus-visible {
+  background: var(--code-bg);
+}
+
+.log-entry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.log-entry.sending {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.log-entry.sent {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.log-entry.sent .log-label::after {
+  content: " \00b7  sent to agent"; /* the first space ends the escape */
+  color: var(--accent);
 }
 
 .log-label {
@@ -475,4 +550,550 @@ body.ended #sendHint {
 .log-entry.tool_result .log-text {
   font-family: ui-monospace, Consolas, monospace;
   font-size: 12px;
+}
+
+/* ---- panel header, connection card, stages, decisions (v0.2) ---- */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+button.primary,
+#panel button.primary {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+}
+
+button.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+button.danger {
+  color: var(--error);
+}
+
+#panel button:focus-visible,
+#panel a:focus-visible,
+#panel select:focus-visible,
+dialog button:focus-visible,
+#logPopover button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+#panelHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+#homeLink {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+  margin-right: auto;
+}
+
+#homeLink:hover {
+  color: var(--text);
+}
+
+#stageSelect,
+#revisionButton {
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+#stageInferred {
+  font-size: 12px;
+}
+
+#revisionBox,
+#moreBox {
+  position: relative;
+}
+
+#revisionMenu,
+#moreMenu {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
+#revisionMenu {
+  right: 0;
+  top: calc(100% + 4px);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+#moreMenu {
+  left: 0;
+  bottom: calc(100% + 4px);
+}
+
+#revisionMenu button,
+#moreMenu button {
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+#revisionMenu button:hover,
+#moreMenu button:hover {
+  background: var(--code-bg);
+}
+
+#moreMenu button.danger {
+  color: var(--error);
+}
+
+.menu-note {
+  padding: 6px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#revisionBar {
+  position: absolute;
+  z-index: 5;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: 13px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);
+}
+
+#stage {
+  position: relative;
+}
+
+#connection {
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: 13px;
+}
+
+#connection[data-state="connected"] {
+  background: var(--ok-bg);
+  color: var(--ok-text);
+}
+
+#connection[data-state="working"] {
+  background: var(--code-bg);
+  color: var(--text);
+}
+
+#connectionText {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+}
+
+#connection .dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+#connection[data-state="connected"] .dot {
+  background: var(--ok-dot);
+}
+
+#connection[data-state="working"] .dot,
+#connection[data-state="starting"] .dot {
+  background: var(--accent);
+  animation: agent-pulse 1.2s ease-in-out infinite;
+}
+
+#connectionActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+#connectionActions button,
+#copyPoll,
+#endedBanner button,
+#decisionBar button,
+#composer button,
+dialog .actions button,
+.popover-actions button:not(.link) {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#connectionActions #sessionFeedback {
+  margin-left: auto;
+}
+
+#commandBox {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+}
+
+#manualConnect {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+#manualConnect summary {
+  cursor: pointer;
+}
+
+#manualConnect code {
+  display: inline-block;
+  margin: 4px 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  word-break: break-all;
+}
+
+#workflowBar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 12px 0;
+  font-size: 12px;
+}
+
+#stageTrack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#stageTrack li {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+#stageTrack li a {
+  color: inherit;
+}
+
+#stageTrack li.track-done,
+#stageTrack li.track-skipped {
+  background: var(--ok-bg);
+  color: var(--ok-text);
+}
+
+#stageTrack li.track-skipped {
+  text-decoration: line-through;
+}
+
+#stageTrack li.track-current {
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+#stageTrack li.here {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+#nextStage {
+  margin: 8px 12px 0;
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+#nextStage p {
+  margin: 0 0 8px;
+}
+
+#endedBanner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 10px 12px 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--code-bg);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.ended-actions {
+  display: flex;
+  gap: 6px;
+}
+
+#queuedLog {
+  padding-top: 8px;
+}
+
+.queued-title {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+#chatPanel {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+#chatPanel[hidden] {
+  display: none;
+}
+
+#chatLog {
+  overflow-y: visible;
+}
+
+.first-run {
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.first-run p {
+  margin: 0 0 6px;
+}
+
+.first-run p:last-child {
+  margin: 0;
+}
+
+#previousRounds {
+  margin: 8px 12px 0;
+  font-size: 13px;
+}
+
+#previousRounds summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+#roundsLog {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  opacity: 0.8;
+}
+
+.round-head {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#decisionBar {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+#decisionBar button.approve {
+  border-color: var(--ok-dot);
+  background: var(--ok-bg);
+  color: var(--ok-text);
+  font-weight: 600;
+}
+
+#composerRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#composerRow #send {
+  margin-left: auto;
+}
+
+#decisionBar button:disabled,
+#connectionActions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+#logPopover {
+  position: fixed;
+  z-index: 30;
+  width: min(320px, calc(100vw - 24px));
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+#logPopover label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#logPopover textarea,
+dialog textarea,
+dialog input[type="text"] {
+  width: 100%;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.popover-actions,
+dialog .actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+dialog {
+  width: min(440px, calc(100vw - 32px));
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-bg);
+  color: var(--text);
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+dialog h2 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+dialog fieldset {
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+}
+
+dialog legend {
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+dialog label {
+  font-size: 13px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.chip:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--user-bg);
+}
+
+.error {
+  color: var(--error);
+  font-size: 13px;
+}
+
+.error:empty {
+  display: none;
+}
+
+body.ended #composer,
+body.ended #decisionBar {
+  opacity: 0.6;
 }

@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Only tag pushes by people with write access run this; it never runs for pull requests.
+permissions:
+  contents: write
+
+env:
+  NODE_VERSION: 22.23.4 # the runtime embedded in every executable
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-latest
+            target: win-x64
+            archive: zip
+          - os: ubuntu-latest
+            target: linux-x64
+            archive: tar.gz
+          - os: macos-15
+            target: macos-arm64
+            archive: tar.gz
+          - os: macos-15-intel
+            target: macos-x64
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Tag matches package.json
+        shell: bash
+        run: |
+          version="v$(node -p "require('./package.json').version")"
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json $version" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run build:sea
+      - run: npm run smoke:bin
+      - name: Package
+        shell: bash
+        run: |
+          name="see-plan-${{ matrix.target }}"
+          mkdir -p "pkg/skills"
+          cp dist/see-plan* pkg/ 2>/dev/null || true
+          rm -f pkg/see-plan.cjs
+          cp LICENSE NOTICE README.md dist/THIRD_PARTY_LICENSES.txt pkg/
+          cp -R skills/my-lavish pkg/skills/
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd pkg && 7z a -tzip "../$name.zip" . > /dev/null)
+          else
+            tar -czf "$name.tar.gz" -C pkg .
+          fi
+          ls -l "$name".*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: see-plan-${{ matrix.target }}
+          path: see-plan-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: out
+          merge-multiple: true
+      - name: Checksums and notes
+        run: |
+          cp install.ps1 install.sh out/
+          (cd out && sha256sum see-plan-* > SHA256SUMS && cat SHA256SUMS)
+          awk -v tag="${GITHUB_REF_NAME#v}" '
+            /^## / { if (found) exit; if (index($0, "[" tag "]")) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md || echo "See CHANGELOG.md." > notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "see-plan $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            out/see-plan-* out/SHA256SUMS out/install.ps1 out/install.sh

@@ -1,0 +1,201 @@
+/* see-plan Claude log page: session header on top, the transcript below. Tokens match chrome.css. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f3ee;
+  --surface: #fffdf9;
+  --text: #2b2620;
+  --muted: #776d60;
+  --border: #e2d9cb;
+  --accent: #c8963e;
+  --user-bg: #f3e6cf;
+  --code-bg: #f1ece4;
+  --error: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #181614;
+    --surface: #1f1c19;
+    --text: #ece6dc;
+    --muted: #a69c8e;
+    --border: #3a342d;
+    --accent: #d6a752;
+    --user-bg: #3b3020;
+    --code-bg: #2a2622;
+    --error: #f2b8b5;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+#top {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px 24px;
+  padding: 16px max(16px, calc((100% - 960px) / 2));
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+#identity {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+#sessionId {
+  margin: 2px 0;
+  font: 600 18px/1.3 ui-monospace, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+#sessionMeta {
+  margin: 0;
+  color: var(--muted);
+}
+
+#switcher {
+  display: flex;
+  flex: 0 1 420px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+#switcher label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+#sessionSelect {
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+#tip,
+#status {
+  max-width: 960px;
+  margin: 12px auto 0;
+  padding: 0 16px;
+  color: var(--muted);
+}
+
+#status:empty {
+  display: none;
+}
+
+#status.error {
+  color: var(--error);
+}
+
+#entries {
+  max-width: 960px;
+  margin: 8px auto 48px;
+  padding: 0 16px;
+}
+
+.entry {
+  margin: 0 -10px 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border-left: 3px solid transparent;
+}
+
+.entry.user.text {
+  background: var(--user-bg);
+}
+
+.entry[role="button"] {
+  cursor: pointer;
+}
+
+.entry[role="button"]:hover,
+.entry[role="button"]:focus-visible {
+  background: var(--code-bg);
+}
+
+.entry:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.entry.saving {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.entry.logged {
+  border-left-color: var(--accent);
+}
+
+.entry.logged .who::after {
+  content: " \00b7  in error log"; /* the first space ends the escape */
+  color: var(--accent);
+}
+
+.label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.who {
+  opacity: 0.7;
+}
+
+.at {
+  font-weight: 400;
+  color: var(--muted);
+  text-transform: none;
+}
+
+.text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.entry.tool_use .text,
+.entry.tool_result .text {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}

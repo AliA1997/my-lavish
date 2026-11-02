@@ -9,6 +9,11 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const BIN = path.join(ROOT, "bin", "see-plan.js");
 const EXAMPLE = path.join(ROOT, "examples", "plan.html");
+// --bin <path>: drive a built single executable instead of `node bin/see-plan.js`.
+const binIndex = process.argv.indexOf("--bin");
+let EXE = binIndex >= 0 ? path.resolve(process.argv[binIndex + 1]) : null;
+if (EXE && process.platform === "win32" && !EXE.endsWith(".exe") && fs.existsSync(`${EXE}.exe`)) EXE += ".exe";
+const ASSETS = ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css"];
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -23,7 +28,8 @@ function freePort() {
 
 function cli(args, env) {
   return new Promise((resolve, reject) => {
-    execFile(process.execPath, [BIN, ...args], { env, timeout: 25000 }, (err, stdout, stderr) => {
+    const [cmd, argv] = EXE ? [EXE, args] : [process.execPath, [BIN, ...args]];
+    execFile(cmd, argv, { env, timeout: 25000 }, (err, stdout, stderr) => {
       if (err) return reject(new Error(`${args.join(" ")} failed: ${err.message}\n${stdout}\n${stderr}`));
       resolve(stdout);
     });
@@ -62,6 +68,15 @@ async function main(env, workDir) {
   const url = new URL(opened.session.url);
   const key = url.pathname.split("/").filter(Boolean).pop();
   const baseUrl = url.origin;
+
+  // The page, the dashboard, and every browser file load from this build's server.
+  for (const p of [url.pathname, "/", "/claude", ...ASSETS.map((a) => `/${a}`)]) {
+    const res = await fetch(baseUrl + p);
+    assert(res.status === 200, `GET ${p} answered ${res.status}`);
+    assert((await res.text()).length > 0, `GET ${p} is empty`);
+  }
+  const health = await (await fetch(`${baseUrl}/health`)).json();
+  assert(health.app === "my-lavish-axi", "health names the app");
 
   const pollPromise = cli(["poll", file, "--json"], env);
   await new Promise((r) => setTimeout(r, 500));
@@ -112,4 +127,4 @@ if (failure) {
   console.error(failure.stack ?? String(failure));
   process.exit(1);
 }
-console.log("SMOKE OK");
+console.log(EXE ? `SMOKE OK (${path.basename(EXE)})` : "SMOKE OK");

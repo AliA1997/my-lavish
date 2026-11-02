@@ -57,6 +57,8 @@
       closeCard();
       hideComment();
       setAnnotate(false);
+    } else if (data.type === "highlightChanges") {
+      highlightChanges(data.added);
     } else if (data.type === "restoreScroll") {
       var x = Number(data.x);
       var y = Number(data.y);
@@ -156,8 +158,31 @@
       "border:1px solid #c8963e;background:#fff;color:#2b2620;font:600 12px/1.4 system-ui,-apple-system,'Segoe UI',sans-serif}",
       ".my-lavish-card button.my-lavish-primary,.my-lavish-comment{background:#c8963e;color:#fff}",
       ".my-lavish-comment{position:fixed;z-index:2147483647;box-shadow:0 2px 8px rgba(0,0,0,.2)}",
+      ".my-lavish-changed{outline:3px solid #c8963e !important;outline-offset:3px;transition:outline-color 1s}",
     ].join("");
     (document.head || document.documentElement).appendChild(style);
+  }
+
+  /** Outlines the blocks that changed since the last revision, for 10 s. Selectors come from the chrome page. */
+  function highlightChanges(selectors) {
+    if (!Array.isArray(selectors)) return;
+    ensureStyle();
+    var marked = [];
+    for (var i = 0; i < selectors.length && i < 20; i++) {
+      if (typeof selectors[i] !== "string") continue;
+      var el = null;
+      try {
+        el = document.querySelector(selectors[i]);
+      } catch (e) {
+        el = null; // a selector this page cannot parse
+      }
+      if (!el || isUi(el)) continue;
+      el.classList.add("my-lavish-changed");
+      marked.push(el);
+    }
+    setTimeout(function () {
+      for (var j = 0; j < marked.length; j++) marked[j].classList.remove("my-lavish-changed");
+    }, 10000);
   }
 
   function clamp(value, min, max) {

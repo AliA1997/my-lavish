@@ -3,6 +3,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { Mutex } from "./async-mutex.js";
 import { htmlPathFor } from "./plan-markdown.js";
+import { canRelabel, inferStageFromPath, isStage, isStageSource } from "./stages.js";
+
+const MAX_HISTORY = 10;
 
 export function sessionKey(file) {
   return crypto.createHash("sha256").update(file).digest("hex").slice(0, 16);
@@ -21,6 +24,10 @@ const now = () => new Date().toISOString();
 function anchorFor(p) {
   if (p.tag === "text") return "text selection";
   if (p.tag === "chat") return "";
+  if (p.tag === "claude-log") return "Claude log entry";
+  if (p.tag === "plan") return "Whole plan";
+  if (p.tag === "session-feedback") return "Session feedback";
+  if (p.tag === "decision") return "Decision";
   return `${p.tag} ${p.selector}`;
 }
 
@@ -71,13 +78,18 @@ export class SessionStore {
     });
   }
 
+  /** Runs fn(state) under the store's lock; fn returns [result, dirty]. For modules that keep data in state.json. */
+  transact(fn) {
+    return this.#tx(fn);
+  }
+
   #need(state, key) {
     const s = state.sessions[key];
     if (!s) throw new StoreError("MISSING", `no session ${key}`);
     return s;
   }
 
-  upsertSession(file, baseUrl, { reopen = false, source_file } = {}) {
+  upsertSession(file, baseUrl, { reopen = false, source_file, stage, workflow_id } = {}) {
     return this.#tx((state) => {
       if (source_file !== undefined && htmlPathFor(source_file) !== file) {
         throw new StoreError("VALIDATION_ERROR", "source_file must be the Markdown source of file");
@@ -92,6 +104,10 @@ export class SessionStore {
           created_at: t, updated_at: t,
         };
         if (source_file !== undefined) session.source_file = source_file;
+        const inferred = inferStageFromPath(source_file ?? file);
+        if (isStage(stage)) Object.assign(session, { stage, stage_source: "flag" });
+        else if (inferred) Object.assign(session, { stage: inferred, stage_source: "path" });
+        if (workflow_id) session.workflow_id = workflow_id;
         state.sessions[key] = session;
         return [{ status: "opened", session }, true];
       }
@@ -100,6 +116,9 @@ export class SessionStore {
       }
       existing.url = `${baseUrl}/session/${key}`;
       if (source_file !== undefined) existing.source_file = source_file;
+      if (isStage(stage)) Object.assign(existing, { stage, stage_source: "flag" });
+      if (workflow_id) existing.workflow_id = workflow_id;
+      delete existing.archived;
       if (existing.status === "ended") reopen_(existing);
       existing.updated_at = now();
       return [{ status: "resumed", session: existing }, true];
@@ -110,8 +129,79 @@ export class SessionStore {
     return this.#tx(async (state) => [state.sessions[key] ?? null, false]);
   }
 
-  listSessions() {
-    return this.#tx(async (state) => [Object.values(state.sessions), false]);
+  listSessions({ includeArchived = false } = {}) {
+    return this.#tx(async (state) => [Object.values(state.sessions).filter((s) => includeArchived || !s.archived), false]);
+  }
+
+  setArchived(key, archived = true) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      if (archived) s.archived = true;
+      else delete s.archived;
+      s.updated_at = now();
+      return [s, true];
+    });
+  }
+
+  /** Removes sessions whose file no longer exists. Returns the removed { key, file } list. */
+  pruneMissing({ dryRun = false, exists = (f) => fs.existsSync(f) } = {}) {
+    return this.#tx((state) => {
+      const removed = [];
+      for (const [key, s] of Object.entries(state.sessions)) {
+        if (exists(s.file)) continue;
+        removed.push({ key, file: s.file });
+        if (!dryRun) delete state.sessions[key];
+      }
+      return [removed, !dryRun && removed.length > 0];
+    });
+  }
+
+  /** Sets the stage label unless a weaker source would overwrite a stronger one (human labels win over inference). */
+  setStage(key, stage, source) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      if (stage !== null && !isStage(stage)) throw new StoreError("VALIDATION_ERROR", `unknown stage "${stage}"`);
+      if (!isStageSource(source)) throw new StoreError("VALIDATION_ERROR", `unknown stage source "${source}"`);
+      if (stage === null && source !== "human" && source !== "flag") return [{ changed: false, stage: s.stage ?? null, stage_source: s.stage_source ?? null }, false];
+      if (!canRelabel(s.stage_source, source) || (s.stage === stage && s.stage_source === source)) {
+        return [{ changed: false, stage: s.stage ?? null, stage_source: s.stage_source ?? null }, false];
+      }
+      if (stage === null) {
+        delete s.stage;
+        delete s.stage_source;
+      } else {
+        s.stage = stage;
+        s.stage_source = source;
+      }
+      s.updated_at = now();
+      return [{ changed: true, stage: s.stage ?? null, stage_source: s.stage_source ?? null }, true];
+    });
+  }
+
+  /** Records an Approve / Request changes decision; approve ends the session (ended_by "approved"). */
+  setDecision(key, { value, comment = "", prompt, force = false }) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      if (s.status === "ended") throw new StoreError("ENDED", "session ended");
+      const unsent = s.prompts.filter((p) => p.tag !== "decision").length; // a later decision supersedes an earlier one
+      if (value === "approve" && unsent && !force) {
+        throw new StoreError("UNSENT_NOTES", `${unsent} note(s) have not reached the agent yet`);
+      }
+      const t = now();
+      s.decision = { value, comment, at: t, revision: s.revision };
+      if (prompt) {
+        const p = cleanPrompt(prompt);
+        s.chat.push({ role: "user", text: p.prompt, anchor: anchorFor(p), at: t, prompt_id: p.prompt_id });
+        s.prompts.push(p);
+        s.status = "feedback";
+      }
+      if (value === "approve") {
+        s.status = "ended";
+        s.ended_by = "approved";
+      }
+      s.updated_at = t;
+      return [s, true];
+    });
   }
 
   queuePrompts(key, { prompts, dom_snapshot = "", end = false }, { restore = false } = {}) {
@@ -136,7 +226,7 @@ export class SessionStore {
         }
         s.prompts.push(...accepted);
         if (accepted.length) {
-          s.dom_snapshot = dom_snapshot;
+          if (dom_snapshot) s.dom_snapshot = dom_snapshot; // a log entry sends none: keep the page's last one
           s.status = "feedback";
         }
         if (end) {
@@ -200,11 +290,27 @@ export class SessionStore {
     });
   }
 
-  startNewSession(key) {
+  /** Resume (keep history): leaves the ended state with the chat and Claude session kept. */
+  reopenSession(key) {
     return this.#tx((state) => {
       const s = this.#need(state, key);
       if (s.status !== "ended") throw new StoreError("NOT_ENDED", "session is not ended");
       reopen_(s);
+      s.updated_at = now();
+      return [s, true];
+    });
+  }
+
+  startNewSession(key) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      if (s.status !== "ended") throw new StoreError("NOT_ENDED", "session is not ended");
+      const endedBy = s.ended_by ?? null;
+      reopen_(s);
+      if (s.chat.length) {
+        s.history = [...(s.history ?? []), { chat: s.chat, ended_at: s.updated_at, ended_by: endedBy }].slice(-MAX_HISTORY);
+      }
+      delete s.decision;
       s.chat = [];
       delete s.claude_session_id;
       s.updated_at = now();

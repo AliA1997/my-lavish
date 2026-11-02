@@ -521,7 +521,7 @@ test("connect-claude launches and records the id", async (t) => {
   assert.equal(fake.calls.length, 1);
   assert.equal(fake.calls[0].file, await fs.promises.realpath(file));
   assert.equal(fake.calls[0].sessionId, body.claude_session_id);
-  assert.equal(path.resolve(fake.calls[0].cwd).startsWith(path.resolve(art).slice(0, 3)), true);
+  assert.equal(path.resolve(fake.calls[0].cwd).startsWith(path.resolve(await fs.promises.realpath(art)).slice(0, 3)), true);
   const msg = await waitFor((m) => m.type === "claude-session");
   assert.equal(msg.id, body.claude_session_id);
   const page = await (await fetch(`${baseUrl}/session/${key}`)).text();

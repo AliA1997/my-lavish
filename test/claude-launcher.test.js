@@ -23,7 +23,7 @@ test("buildClaudeLaunch encodes the claude command", () => {
   const l = buildClaudeLaunch({ file: "C:\\p\\plan.md", sessionId: ID, claudePath: "C:\\bin\\claude.exe", env: {} });
   assert.deepEqual(l.args.slice(0, 2), ["-NoExit", "-EncodedCommand"]);
   assert.equal(decode(l.args[2]), SCRIPT);
-  assert.ok(path.isAbsolute(l.command));
+  if (process.platform === "win32") assert.ok(path.isAbsolute(l.command)); // a Windows path is only absolute on Windows
   assert.match(l.command, /System32[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/);
   assert.equal(l.env.SEE_PLAN_CLAUDE, "C:\\bin\\claude.exe");
   assert.ok(l.env.SEE_PLAN_PROMPT.startsWith("[see-plan · plan · Review] This is a see-plan review session for the file C:\\p\\plan.md. Run see-plan poll on that file (quote the path for your shell) and follow its next_step."));

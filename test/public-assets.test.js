@@ -140,3 +140,13 @@ test("the Claude log page and its files are served", async (t) => {
   assert.ok(client.includes("/api/claude-errors") && client.includes("/api/claude-sessions/"));
   await fetchAsset(baseUrl, "logs.css");
 });
+
+test("the repository is MIT licensed with an upstream notice", async () => {
+  const root = new URL("../", import.meta.url);
+  const license = await fs.promises.readFile(new URL("LICENSE", root), "utf8");
+  assert.match(license, /^MIT License/);
+  const pkg = JSON.parse(await fs.promises.readFile(new URL("package.json", root), "utf8"));
+  assert.equal(pkg.license, "MIT");
+  assert.ok(pkg.files.includes("LICENSE") && pkg.files.includes("NOTICE") && !pkg.files.includes("test"));
+  assert.match(await fs.promises.readFile(new URL("NOTICE", root), "utf8"), /lavish-axi.*Kun Chen/s);
+});

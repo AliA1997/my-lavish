@@ -164,3 +164,9 @@ Left out on purpose, to keep only the core loop:
 - Revisions legend
 
 Built-in guidance is limited to the `design` text and five playbooks (`plan`, `diagram`, `table`, `comparison`, `input`).
+
+## License
+
+MIT. See [LICENSE](LICENSE). Release archives also include `THIRD_PARTY_LICENSES.txt` (every bundled dependency, plus Node.js, which the standalone executable embeds).
+
+**Credits:** see-plan is an independent re-implementation of the core review loop of [lavish-axi](https://github.com/kunchenguid/lavish-axi) by Kun Chen (MIT). See [NOTICE](NOTICE).

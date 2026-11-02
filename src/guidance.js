@@ -109,7 +109,7 @@ export const PLAYBOOKS = [
 ];
 
 export const HOME_USAGE = [
-  "see-plan <file.html|file.md>  open the plan in the browser (--with-claude also starts Claude in PowerShell)",
+  "see-plan <file.html|file.md>  open the plan in the browser (--with-claude also starts Claude in a new terminal; --stage <name>)",
   "see-plan poll <file>          wait for the human's feedback; agent polls return about every 1:50, run again (--agent-reply, --agent-reply-file, --timeout-ms, --claude-session, --agent)",
   "see-plan reply <file>         post a chat reply without polling (--agent-reply)",
   "see-plan end <file>           end the session",

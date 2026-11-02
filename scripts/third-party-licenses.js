@@ -19,7 +19,8 @@ const out = path.resolve(arg("--out") ?? path.join(ROOT, "THIRD_PARTY_LICENSES.t
 const withNode = process.argv.includes("--node");
 
 function npmLs() {
-  const npmCli = process.env.npm_execpath;
+  const bundled = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  const npmCli = process.env.npm_execpath ?? (fs.existsSync(bundled) ? bundled : undefined);
   const [cmd, args] = npmCli && npmCli.endsWith(".js")
     ? [process.execPath, [npmCli, "ls", "--omit=dev", "--all", "--json"]]
     : [process.platform === "win32" ? "npm.cmd" : "npm", ["ls", "--omit=dev", "--all", "--json"]];

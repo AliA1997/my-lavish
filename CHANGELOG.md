@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.1] - 2026-11-03
+
+### Error log
+- On the Claude log page (`/claude`), clicking an entry now opens a confirmation dialog instead of writing at once. It shows a preview of the entry and an optional *Why is this an error?* box. **Log as error** or Ctrl/Cmd+Enter saves it; Esc or **Cancel** leaves the log untouched, and focus returns to the entry.
+- Records in `~/claude-errors/error-log.json` gain a `reason` field (a trimmed string up to 2,000 characters, or `null`).
+- Logging an entry that is already there keeps the first reason. The response says `already_logged` and returns the saved reason, and the dialog shows it read-only.
+- In the panel, the log popover's note is saved as the reason when you choose **Log as error** or **Both**. The box is now labeled "Note to agent / reason (optional)".
+
+### Fixes
+- Session routes (`/api/:key/...`) answer 404 for any key that is not 16 hex digits. Before, a key such as `__proto__` could reach the session store.
+
 ## [0.2.0] - 2026-11-01
 
 First release with a standalone executable. Install with one line (see the README), or download an archive below and check it against `SHA256SUMS`.

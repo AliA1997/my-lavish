@@ -33,15 +33,14 @@ async function readRecords(file) {
 async function append(file, record) {
   const records = await readRecords(file);
   const ref = refOf(record);
-  if (records.some((r) => r?.claude_session_id === record.claude_session_id && typeof r.uuid === "string" && refOf(r) === ref)) {
-    return { duplicate: true };
-  }
+  const saved = records.find((r) => r?.claude_session_id === record.claude_session_id && typeof r.uuid === "string" && refOf(r) === ref);
+  if (saved) return { duplicate: true, reason: typeof saved.reason === "string" ? saved.reason : null }; // the first reason is kept
   records.push(record);
   await fs.promises.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   await fs.promises.writeFile(tmp, JSON.stringify(records, null, 2) + "\n");
   await fs.promises.rename(tmp, file); // a crash mid-write never leaves a half-written log
-  return { duplicate: false };
+  return { duplicate: false, reason: record.reason ?? null };
 }
 
 /** Appends `record` to the JSON array in `file` (created if missing); a record already there is skipped. */
@@ -51,8 +50,17 @@ export function appendErrorLog(file, record) {
   return run;
 }
 
-/** "<uuid>:<part>" for each record of one Claude session, so the page can mark entries already logged. */
-export async function reportedRefs(file, claudeSessionId) {
+/**
+ * The records of one Claude session, so the page can mark entries already logged:
+ * `refs` lists "<uuid>:<part>" and `reasons` maps a ref to its saved reason (only refs that have one).
+ */
+export async function reportedRecords(file, claudeSessionId) {
   const records = await readRecords(file).catch(() => []);
-  return records.filter((r) => r?.claude_session_id === claudeSessionId && typeof r.uuid === "string").map(refOf);
+  const mine = records.filter((r) => r?.claude_session_id === claudeSessionId && typeof r.uuid === "string");
+  const reasons = Object.create(null);
+  for (const r of mine) {
+    const ref = refOf(r);
+    if (typeof r.reason === "string" && r.reason && !(ref in reasons)) reasons[ref] = r.reason;
+  }
+  return { refs: mine.map(refOf), reasons };
 }

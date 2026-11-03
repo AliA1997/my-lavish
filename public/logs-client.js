@@ -1,4 +1,4 @@
-/* see-plan Claude log page: shows one Claude session's transcript; a click adds an entry to the error log. */
+/* see-plan Claude log page: shows one Claude session's transcript; a click opens a dialog that logs an entry as an error. */
 (function () {
   "use strict";
 
@@ -6,6 +6,8 @@
   var POLL_MS = 2000;
   var LIST_MS = 30000;
   var MAX_ENTRIES = 1000;
+  var MAX_REASON = 2000;
+  var PREVIEW_CHARS = 300;
 
   var sessionIdEl = document.getElementById("sessionId");
   var lastPromptEl = document.getElementById("lastPrompt");
@@ -13,12 +15,22 @@
   var select = document.getElementById("sessionSelect");
   var statusEl = document.getElementById("status");
   var entriesEl = document.getElementById("entries");
+  var dialog = document.getElementById("logDialog");
+  var dialogTitle = document.getElementById("logDialogTitle");
+  var previewMeta = document.getElementById("logPreviewMeta");
+  var preview = document.getElementById("logPreview");
+  var reasonEl = document.getElementById("logReason");
+  var dialogHint = document.getElementById("logDialogHint");
+  var cancelButton = document.getElementById("logCancel");
+  var confirmButton = document.getElementById("logConfirm");
 
   var sessions = [];
   var current = null; // { id, modified_at, cwd, project }
   var next = null; // byte offset for the next read, null = start from the tail
   var lastPromptAt = null;
   var reported = {}; // "<uuid>:<part>" -> true
+  var reasons = {}; // "<uuid>:<part>" -> the reason saved with it
+  var pending = null; // { entry, row, sessionId, logged } while the dialog is open
   var timer = null;
   var busy = false;
   var generation = 0; // bumped on every switch so a late answer for the old session is dropped
@@ -108,8 +120,7 @@
     if (!entry || typeof entry !== "object") return;
     var row = element("article", "entry " + String(entry.kind || "text").replace(/[^a-z_]/g, "") + (entry.role === "assistant" ? " assistant" : " user"));
     var label = element("div", "label");
-    var kind = entry.kind === "tool_use" ? " · tool call" : entry.kind === "tool_result" ? " · tool result" : "";
-    label.appendChild(element("span", "who", (entry.role === "assistant" ? "Claude" : "User") + kind));
+    label.appendChild(element("span", "who", roleLabel(entry)));
     if (entry.at) label.appendChild(element("time", "at", formatTime(entry.at)));
     row.appendChild(label);
     row.appendChild(element("div", "text", String(entry.text || "")));
@@ -117,28 +128,81 @@
     if (ref) {
       row.tabIndex = 0;
       row.setAttribute("role", "button");
-      row.title = (entry.at ? formatDate(entry.at) + "\n" : "") + "Click to add this entry to " + ERROR_LOG;
+      row.title = (entry.at ? formatDate(entry.at) + "\n" : "") + "Click to log this entry as an error in " + ERROR_LOG;
       if (reported[ref]) row.classList.add("logged");
       row.addEventListener("click", function () {
         var selection = window.getSelection ? window.getSelection() : null;
         if (selection && !selection.isCollapsed && row.contains(selection.anchorNode)) return; // copying text
-        logEntry(entry, row);
+        openDialog(entry, row);
       });
       row.addEventListener("keydown", function (event) {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
-          logEntry(entry, row);
+          openDialog(entry, row);
         }
       });
     }
     entriesEl.appendChild(row);
   }
 
-  function logEntry(entry, row) {
-    if (row.classList.contains("logged")) {
-      setStatus("That entry is already in " + ERROR_LOG + ".", false);
-      return;
+  function roleLabel(entry) {
+    var kind = entry.kind === "tool_use" ? " · tool call" : entry.kind === "tool_result" ? " · tool result" : "";
+    return (entry.role === "assistant" ? "Claude" : "User") + kind;
+  }
+
+  /** Opens the confirmation; every text here is set with textContent, as the entry and the reason are untrusted. */
+  function openDialog(entry, row) {
+    if (!current || row.classList.contains("saving")) return;
+    var ref = refOf(entry);
+    var logged = Boolean(reported[ref]);
+    pending = { entry: entry, row: row, sessionId: current.id, logged: logged };
+    dialogTitle.textContent = logged ? "Already in the error log" : "Log as error";
+    previewMeta.textContent = [roleLabel(entry), entry.at ? formatDate(entry.at) : ""].filter(Boolean).join(" · ");
+    preview.textContent = clip(entry.text, PREVIEW_CHARS);
+    reasonEl.value = logged ? reasons[ref] || "" : "";
+    reasonEl.readOnly = logged;
+    reasonEl.placeholder = logged ? "No reason was given." : "What went wrong here?";
+    confirmButton.hidden = logged;
+    cancelButton.textContent = logged ? "Close" : "Cancel";
+    dialogHint.textContent = logged ? "Reasons can't be edited. Esc to close." : "Ctrl+Enter to log · Esc to cancel";
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+    (logged ? cancelButton : reasonEl).focus();
+  }
+
+  function closeDialog() {
+    if (typeof dialog.close === "function") dialog.close();
+    else dialog.removeAttribute("open");
+  }
+
+  // However the dialog closes (Esc, Cancel, after logging), focus goes back to the entry.
+  dialog.addEventListener("close", function () {
+    var row = pending && pending.row;
+    pending = null;
+    if (row && row.isConnected) row.focus();
+  });
+
+  cancelButton.addEventListener("click", closeDialog);
+
+  dialog.addEventListener("submit", function (event) {
+    event.preventDefault();
+    confirmLog();
+  });
+
+  dialog.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      confirmLog();
     }
+  });
+
+  function confirmLog() {
+    if (!pending || pending.logged) return;
+    var entry = pending.entry;
+    var row = pending.row;
+    var sessionId = pending.sessionId;
+    var reason = reasonEl.value.trim().slice(0, MAX_REASON);
+    closeDialog();
     if (row.classList.contains("saving")) return;
     row.classList.add("saving");
     fetch("/api/claude-errors", {
@@ -146,22 +210,29 @@
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         entry: {
-          claude_session_id: current.id,
+          claude_session_id: sessionId,
           uuid: entry.uuid,
           part: Number(entry.part) || 0,
           role: String(entry.role || ""),
           kind: String(entry.kind || ""),
           at: entry.at ? String(entry.at) : null,
           text: String(entry.text || ""),
+          reason: reason || null,
         },
       }),
     })
       .then(function (res) {
         return readJson(res).then(function (body) {
           if (res.ok) {
-            reported[refOf(entry)] = true;
+            var ref = refOf(entry);
+            if (current && current.id === sessionId) {
+              reported[ref] = true;
+              if (body && typeof body.reason === "string" && body.reason) reasons[ref] = body.reason;
+            }
             row.classList.add("logged");
-            setStatus((body && body.duplicate ? "Already in " : "Added to ") + ERROR_LOG + ".", false);
+            setStatus(body && body.duplicate
+              ? "Already in " + ERROR_LOG + "; the first reason was kept."
+              : "Added to " + ERROR_LOG + (reason ? " with your reason." : "."), false);
           } else {
             setStatus(body && body.error && body.error.message ? body.error.message : "Could not write the error log (HTTP " + res.status + ").", true);
           }
@@ -192,6 +263,11 @@
         var first = next === null;
         var stick = first || nearBottom();
         if (Array.isArray(body.reported)) body.reported.forEach(function (ref) { reported[ref] = true; });
+        if (body.reasons && typeof body.reasons === "object") {
+          Object.keys(body.reasons).forEach(function (ref) {
+            if (typeof body.reasons[ref] === "string") reasons[ref] = body.reasons[ref];
+          });
+        }
         if (body.omitted && !first) entriesEl.textContent = ""; // the file was replaced: start over
         if (first) setStatus(body.omitted ? "Showing the most recent entries; earlier ones are omitted." : body.entries.length ? "" : "This session has no entries yet.", false);
         body.entries.forEach(addEntry);
@@ -220,6 +296,7 @@
     next = null;
     lastPromptAt = null;
     reported = {};
+    reasons = {};
     entriesEl.textContent = "";
     setStatus(session ? "Loading…" : "No Claude sessions found in ~/.claude/projects.", false);
     renderHeader();

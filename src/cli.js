@@ -645,7 +645,7 @@ async function cmdLogs(flags, io) {
   return {
     logs: { url, status: opened ? "opened" : "ready" },
     next_step: opened
-      ? "The browser shows the newest Claude session's log; clicking an entry adds it to ~/claude-errors/error-log.json."
+      ? "The browser shows the newest Claude session's log; clicking an entry opens a dialog that logs it, with an optional reason, to ~/claude-errors/error-log.json."
       : `Open ${url} to see the newest Claude session's log.`,
   };
 }

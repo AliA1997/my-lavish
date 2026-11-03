@@ -1186,8 +1186,9 @@
     popoverRow = null;
   }
 
-  function entryRecord(entry) {
-    return {
+  /** `reason` rides along only when the entry is logged as an error: the popover note is the reason. */
+  function entryRecord(entry, reason) {
+    var record = {
       claude_session_id: claudeSessionId,
       uuid: typeof entry.uuid === "string" ? entry.uuid : null,
       part: Number(entry.part) || 0,
@@ -1196,14 +1197,16 @@
       at: entry.at ? String(entry.at) : null,
       text: String(entry.text || ""),
     };
+    if (reason !== undefined) record.reason = reason || null;
+    return record;
   }
 
   /** The server writes the error log itself; the agent is never asked to. */
-  function logAsError(entry) {
+  function logAsError(entry, reason) {
     return fetch("/api/claude-errors", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ entry: entryRecord(entry) }),
+      body: JSON.stringify({ entry: entryRecord(entry, reason) }),
     }).then(function (res) {
       return readJson(res).then(function (body) {
         if (!res.ok) throw new Error(errorMessage(body, res.status));
@@ -1249,11 +1252,11 @@
       return;
     }
     hidePopover();
-    var step = asError ? logAsError(entry) : Promise.resolve(null);
+    var step = asError ? logAsError(entry, note) : Promise.resolve(null); // the popover is the confirmation
     step
       .then(function (logged) {
         if (!toAgent) {
-          showHint(logged && logged.duplicate ? "Already in " + ERROR_LOG + "." : "Logged to " + ERROR_LOG + ".", false);
+          showHint(logged && logged.duplicate ? "Already in " + ERROR_LOG + "; the first reason was kept." : "Logged to " + ERROR_LOG + ".", false);
           return;
         }
         return sendEntryToAgent(entry, row, note, asError).then(function (body) {

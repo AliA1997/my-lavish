@@ -22,9 +22,23 @@ export function createLogsHtml({ baseUrl } = {}) {
     <select id="sessionSelect"></select>
   </div>
 </header>
-<p id="tip">Click an entry to add it to ~/claude-errors/error-log.json.</p>
+<p id="tip">Click an entry to log it as an error in ~/claude-errors/error-log.json. You can say why before it is saved.</p>
 <p id="status" role="status" aria-live="polite"></p>
 <main id="entries"></main>
+<dialog id="logDialog" aria-labelledby="logDialogTitle">
+  <form id="logForm" method="dialog">
+    <h2 id="logDialogTitle">Log as error</h2>
+    <p id="logPreviewMeta" class="preview-meta"></p>
+    <blockquote id="logPreview"></blockquote>
+    <label for="logReason">Why is this an error? (optional)</label>
+    <textarea id="logReason" rows="4" maxlength="2000"></textarea>
+    <p id="logDialogHint" class="hint">Ctrl+Enter to log &middot; Esc to cancel</p>
+    <div class="dialog-actions">
+      <button id="logCancel" type="button">Cancel</button>
+      <button id="logConfirm" type="submit" class="primary">Log as error</button>
+    </div>
+  </form>
+</dialog>
 <script src="/logs-client.js"></script>
 </body>
 </html>

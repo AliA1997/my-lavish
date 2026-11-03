@@ -10,7 +10,7 @@ import { assertHtmlFile, canonicalFile, resolveArtifactAsset } from "./artifact-
 import { injectSdk } from "./html-transform.js";
 import { createChromeHtml } from "./chrome-page.js";
 import { createLogsHtml } from "./logs-page.js";
-import { appendErrorLog, ErrorLogError, reportedRefs } from "./error-log.js";
+import { appendErrorLog, ErrorLogError, reportedRecords } from "./error-log.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
 import { ensurePlanHtml, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
@@ -38,6 +38,8 @@ const MAX_FEEDBACK_TEXT = 4000;
 const LOG_ROLES = new Set(["user", "assistant"]);
 const LOG_KINDS = new Set(["text", "tool_use", "tool_result"]);
 const MAX_LOG_TEXT = 20000;
+const MAX_REASON = 2000;
+const SESSION_KEY = /^[0-9a-f]{16}$/; // sessionKey(): the first 16 hex digits of a sha256
 const PAGE_LOG_BYTES = 1024 * 1024; // the log page's first window; it doubles up to PAGE_MAX_BYTES...
 const PAGE_MAX_BYTES = 16 * 1024 * 1024;
 const PAGE_MIN_ENTRIES = 200; // ...until it holds this many entries (screenshots make some lines huge)
@@ -376,6 +378,12 @@ export function createServer({
     } catch (e) {
       next(e);
     }
+  });
+
+  // Sessions live in a plain object, so a key like "__proto__" must never reach the store.
+  app.param("key", (req, res, next, key) => {
+    if (!SESSION_KEY.test(key)) return res.status(404).json(errorBody("NOT_FOUND", "Unknown session"));
+    next();
   });
 
   app.post("/api/:key/prompts", async (req, res, next) => {
@@ -1041,7 +1049,9 @@ export function createServer({
       if (after === undefined) {
         // First read: the header needs the last prompt even when it is older than the tail window.
         if (!body.last_prompt_at) body.last_prompt_at = await findLastPromptAt(file, read.next);
-        body.reported = await reportedRefs(errorLogFile, id); // and the page marks entries already logged
+        const saved = await reportedRecords(errorLogFile, id); // and the page marks entries already logged
+        body.reported = saved.refs;
+        body.reasons = saved.reasons;
       }
       res.json(body);
     } catch (e) {
@@ -1066,6 +1076,13 @@ export function createServer({
       if (!valid) {
         return res.status(400).json(errorBody("VALIDATION_ERROR", "entry must be one Claude log entry"));
       }
+      if (e.reason !== undefined && e.reason !== null && typeof e.reason !== "string") {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "reason must be a string"));
+      }
+      const reason = typeof e.reason === "string" ? e.reason.trim() : "";
+      if (reason.length > MAX_REASON) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", `reason must be at most ${MAX_REASON} characters`));
+      }
       const record = {
         claude_session_id: e.claude_session_id,
         uuid: e.uuid,
@@ -1074,6 +1091,7 @@ export function createServer({
         kind: e.kind,
         at: e.at,
         text: e.text,
+        reason: reason || null,
         reported_at: new Date().toISOString(),
       };
       let result;
@@ -1083,7 +1101,13 @@ export function createServer({
         if (!(err instanceof ErrorLogError)) throw err;
         return res.status(409).json(errorBody(err.code, err.message));
       }
-      res.json({ ok: true, duplicate: result.duplicate, error_log: errorLogFile });
+      res.json({
+        ok: true,
+        status: result.duplicate ? "already_logged" : "logged",
+        duplicate: result.duplicate,
+        reason: result.reason, // on a duplicate, the reason saved the first time
+        error_log: errorLogFile,
+      });
     } catch (e) {
       next(e);
     }

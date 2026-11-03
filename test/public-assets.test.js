@@ -133,11 +133,16 @@ test("the Claude log page and its files are served", async (t) => {
   const { baseUrl } = await setup(t);
   const html = await (await fetch(`${baseUrl}/claude`)).text();
   for (const id of ["sessionId", "lastPrompt", "sessionSelect", "entries", "status"]) assert.ok(html.includes(`id="${id}"`), id);
+  assert.ok(html.includes('<dialog id="logDialog"'), "a click opens a confirmation dialog");
+  for (const id of ["logPreview", "logPreviewMeta", "logReason", "logConfirm", "logCancel"]) assert.ok(html.includes(`id="${id}"`), id);
+  assert.match(html, /Why is this an error\? \(optional\)/);
   assert.ok(html.includes('src="/logs-client.js"') && html.includes('href="/logs.css"'));
   const client = await fetchAsset(baseUrl, "logs-client.js");
   assert.doesNotThrow(() => new Function(client), "logs-client.js has a syntax error");
   assert.ok(!client.includes("innerHTML"), "transcript text is set with textContent only");
   assert.ok(client.includes("/api/claude-errors") && client.includes("/api/claude-sessions/"));
+  assert.ok(client.includes("showModal") && client.includes("ctrlKey") && client.includes("metaKey"), "the dialog confirms with Ctrl/Cmd+Enter");
+  assert.ok(client.includes("reason: reason || null"), "the reason is sent with the entry");
   await fetchAsset(baseUrl, "logs.css");
 });
 

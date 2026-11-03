@@ -835,6 +835,55 @@ test("a log page click appends the entry to the error log once", async (t) => {
   }
 });
 
+test("a logged entry keeps an optional reason; a duplicate keeps the first one", async (t) => {
+  const { baseUrl, postJson, errorLogFile, entry } = await logPage(t);
+  const page = { Origin: baseUrl };
+  const post = async (e) => {
+    const res = await postJson("/api/claude-errors", { entry: e }, page);
+    return { status: res.status, body: await res.json() };
+  };
+
+  const withReason = await post({ ...entry, reason: "  wrong file edited  " });
+  assert.equal(withReason.status, 200);
+  assert.deepEqual([withReason.body.status, withReason.body.duplicate, withReason.body.reason], ["logged", false, "wrong file edited"]);
+
+  const without = await post({ ...entry, part: 1 });
+  assert.deepEqual([without.body.status, without.body.reason], ["logged", null]);
+  const blank = await post({ ...entry, part: 2, reason: "   " });
+  assert.equal(blank.body.reason, null, "an empty reason is stored as null");
+
+  const again = await post({ ...entry, reason: "a second opinion" });
+  assert.deepEqual([again.status, again.body.status, again.body.duplicate, again.body.reason], [200, "already_logged", true, "wrong file edited"]);
+
+  const tooLong = await post({ ...entry, part: 3, reason: "x".repeat(2001) });
+  assert.deepEqual([tooLong.status, tooLong.body.error.code], [400, "VALIDATION_ERROR"]);
+  assert.equal((await post({ ...entry, part: 3, reason: "x".repeat(2000) })).status, 200, "2,000 characters is allowed");
+  for (const bad of [42, ["x"], { text: "x" }, true]) {
+    const res = await post({ ...entry, part: 4, reason: bad });
+    assert.deepEqual([res.status, res.body.error.code], [400, "VALIDATION_ERROR"], JSON.stringify(bad));
+  }
+
+  const records = JSON.parse(await fs.promises.readFile(errorLogFile, "utf8"));
+  assert.deepEqual(records.map((r) => [r.part, r.reason === null ? null : r.reason.length > 20 ? "long" : r.reason]), [[0, "wrong file edited"], [1, null], [2, null], [3, "long"]]);
+  assert.ok(records.every((r) => "reason" in r), "every new record has a reason field");
+
+  const log = await (await fetch(`${baseUrl}/api/claude-sessions/${CLAUDE_ID}/log`)).json();
+  assert.deepEqual(log.reported, ["u-9:0", "u-9:1", "u-9:2", "u-9:3"]);
+  assert.deepEqual(Object.keys(log.reasons), ["u-9:0", "u-9:3"], "only refs with a reason are listed");
+  assert.equal(log.reasons["u-9:0"], "wrong file edited");
+});
+
+test("session routes refuse keys that are not 16 hex digits, __proto__ included", async (t) => {
+  const { baseUrl, postJson } = await logPage(t);
+  for (const key of ["__proto__", "constructor", "ABCDEF0123456789", "abc"]) {
+    const res = await postJson(`/api/${encodeURIComponent(key)}/archive`, { archived: true }, { Origin: baseUrl });
+    assert.equal(res.status, 404, key);
+    assert.equal((await res.json()).error.code, "NOT_FOUND", key);
+  }
+  assert.equal(Object.prototype.archived, undefined, "nothing was written to Object.prototype");
+  assert.equal((await fetch(`${baseUrl}/api/__proto__/status`)).status, 404);
+});
+
 test("the error log keeps existing records and is never overwritten when it is not a JSON array", async (t) => {
   const { baseUrl, postJson, errorLogFile, entry } = await logPage(t);
   await fs.promises.mkdir(path.dirname(errorLogFile), { recursive: true });

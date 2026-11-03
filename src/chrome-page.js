@@ -167,7 +167,7 @@ export function createChromeHtml(session, { baseUrl, canResume = false, workflow
   </aside>
 </div>
 <div id="logPopover" role="dialog" aria-label="Claude log entry" hidden>
-  <label for="logNote">Note for the agent (optional)</label>
+  <label for="logNote">Note to agent / reason (optional)</label>
   <textarea id="logNote" rows="3" placeholder="What went wrong here?"></textarea>
   <div class="popover-actions">
     <button id="logSend" type="button" class="primary">Send to agent</button>

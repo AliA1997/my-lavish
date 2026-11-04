@@ -1,4 +1,5 @@
-/* see-plan error logs page: four tabs (session errors, plan errors, plans, Claude sessions). textContent only. */
+/* see-plan error logs page. In a project: four tabs (session errors, plan errors, the project's superpowers plans,
+   Claude sessions). Outside one: only the Sessions tab. The tabs are read from the page. textContent only. */
 (function () {
   "use strict";
 
@@ -8,14 +9,15 @@
   var REASON_REQUIRED = ["high", "send_to_it"];
   var FILTERS = ["all"].concat(SEVERITIES, ["unrated"]);
   var FILTER_TITLES = { all: "All", low: "Low", medium: "Medium", high: "High", send_to_it: "Send to IT", unrated: "Unrated" };
-  var TABS = ["session-errors", "plan-errors", "plans", "sessions"];
+  var PROJECT = document.body.getAttribute("data-project") || ""; // "" = sessions only (D13)
+  var TABS = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]')).map(function (t) { return t.getAttribute("data-tab"); });
   var CONTEXT = { "session-errors": "session", "plan-errors": "plan" };
   var PAGE = 50;
   var REFRESH_MS = 30000;
   var EMPTY = {
     "session-errors": "No errors logged from sessions yet. Log one from the Claude log page.",
     "plan-errors": "No errors logged from planning sessions yet. Log one from a plan's Claude log.",
-    plans: "No plans yet. Plans in docs/superpowers/plans/ or specs/, or a feature's .plan.md, show up here.",
+    plans: "No superpowers plans in this project yet. Files in docs/superpowers/plans/ show up here.",
     sessions: "No Claude sessions found in ~/.claude/projects.",
   };
 
@@ -80,6 +82,12 @@
   function formatDate(iso) {
     var t = Date.parse(iso);
     return isFinite(t) ? new Date(t).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
+  }
+
+  /** Plans are dated by day (the name prefix), so no time of day. */
+  function formatDay(iso) {
+    var t = Date.parse(iso);
+    return isFinite(t) ? new Date(t).toLocaleDateString(undefined, { dateStyle: "medium" }) : "";
   }
 
   function basename(p) {
@@ -201,7 +209,8 @@
   }
 
   function loadSummary() {
-    return getJson("/api/errors/summary")
+    if (!PROJECT) return Promise.resolve(); // sessions only: no error counts to show
+    return getJson("/api/errors/summary?project=" + encodeURIComponent(PROJECT))
       .then(function (body) {
         summary = body;
         if (body && body.counts) {
@@ -236,9 +245,10 @@
         s.total = body.total;
       });
     } else if (id === "plans") {
-      request = getJson("/api/plans?limit=50").then(function (body) {
+      request = getJson("/api/projects/" + encodeURIComponent(PROJECT) + "/plans").then(function (body) {
         if (stale()) return;
         s.items = body.items || [];
+        setCount("plans", typeof body.total === "number" ? body.total : s.items.length);
       });
     } else {
       request = getJson("/api/claude-sessions?limit=75").then(function (body) {
@@ -369,18 +379,46 @@
       body.appendChild(element("p", "empty", EMPTY.plans));
       return;
     }
-    var t = table(["Plan", "Feature", "Status", "Created", "Errors"]);
+    var t = table(["Plan", "Created", "Status", "Errors", ""]);
     items.forEach(function (p) {
       var tr = element("tr");
-      cell(tr, link(sessionHref(p.key), basename(p.file), p.file), "col-plan");
-      cell(tr, p.feature || "—");
+      var planTd = cell(tr, "", "col-plan");
+      var title = p.title || p.name;
+      planTd.appendChild(p.review_key ? link(sessionHref(p.review_key), title, p.file) : element("span", "plan-title", title));
+      if (p.title) planTd.appendChild(element("div", "plan-file", p.name));
+      cell(tr, formatDay(p.created_at));
       cell(tr, element("span", "status status-" + String(p.status || "").toLowerCase().replace(/[^a-z]+/g, "-"), p.status));
-      cell(tr, formatDate(p.created_at));
       cell(tr, errorsCell(p.error_count, p.worst_severity));
+      var actions = cell(tr, "", "col-actions");
+      if (!p.review_key) {
+        var open = element("button", "", "Open");
+        open.type = "button";
+        open.setAttribute("aria-label", "Open " + p.name + " in see-plan");
+        open.addEventListener("click", function () { openPlan(p, open); });
+        actions.appendChild(open);
+      }
       t.body.appendChild(tr);
     });
     body.appendChild(t.table);
-    body.appendChild(element("p", "table-foot", "The " + items.length + " most recently created plans."));
+    body.appendChild(element("p", "table-foot", "The " + items.length + " most recently created plans in docs/superpowers/plans/."));
+  }
+
+  function openPlan(p, button) {
+    button.disabled = true;
+    fetch("/api/projects/" + encodeURIComponent(PROJECT) + "/plans/open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: p.name }),
+    })
+      .then(readJson)
+      .then(function (body) {
+        if (!body || typeof body.key !== "string" || !/^[0-9a-f]{16}$/.test(body.key)) throw new Error("unexpected response");
+        location.href = sessionHref(body.key);
+      })
+      .catch(function (e) {
+        button.disabled = false;
+        setStatus("Could not open the plan: " + e.message, true);
+      });
   }
 
   function renderSessions(body) {

@@ -46,6 +46,7 @@ a { color: var(--link); }
 
 #top,
 #status,
+#scope,
 #tabs,
 [role="tabpanel"] {
   padding-left: max(16px, calc((100% - 1200px) / 2));
@@ -270,3 +271,27 @@ dialog textarea { width: 100%; font: inherit; padding: 6px; border: 1px solid va
 .severity-option .sev-hint { grid-area: hint; color: var(--muted); font-size: 12px; }
 .severity-picker.compact .sev-hint { display: none; }
 .saved-severity { margin: 8px 0; }
+
+/* Project scope line (project mode) and the sessions-only hint (D13). */
+.scope {
+  padding-top: 12px;
+  margin: 0 0 1rem;
+  color: var(--muted);
+}
+.scope p {
+  margin: 0.25rem 0;
+}
+.scope code {
+  font-size: 0.9em;
+}
+.scope-note {
+  color: var(--text);
+}
+.plan-file {
+  color: var(--muted);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+.col-actions {
+  white-space: nowrap;
+}

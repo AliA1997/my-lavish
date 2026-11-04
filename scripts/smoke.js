@@ -91,7 +91,7 @@ async function main(env, workDir) {
   await cli(["reply", file, "--agent-reply", "Done", "--json"], env);
   await cli(["end", file, "--json"], env);
 
-  await errorTabs(baseUrl, workDir);
+  await errorTabs(baseUrl, workDir, stateDir);
 }
 
 const PLAN_CLAUDE = "00000000-0000-4000-8000-00000000a001";
@@ -106,7 +106,7 @@ async function jsonFetch(url, init) {
 }
 
 /** One entry of each severity from a plan session and from a plain session; then the /errors tabs count them. */
-async function errorTabs(baseUrl, workDir) {
+async function errorTabs(baseUrl, workDir, stateDir) {
   const post = (p, body, headers = {}) => jsonFetch(baseUrl + p, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   const planFile = path.join(workDir, "docs", "superpowers", "plans", "smoke-plan.html");
   fs.mkdirSync(path.dirname(planFile), { recursive: true });
@@ -125,18 +125,30 @@ async function errorTabs(baseUrl, workDir) {
       assert(logged.status === "logged" && logged.severity === severity, `logged ${label} ${severity}`);
     }
   }
-  const page = await fetch(`${baseUrl}/errors`);
-  assert(page.status === 200 && (await page.text()).includes('role="tablist"'), "GET /errors serves the tabbed page");
-  const summary = await jsonFetch(`${baseUrl}/api/errors/summary`);
+  // D9/D10: workDir is a project (a .git folder) with two superpowers plans; stateDir is not a project.
+  fs.mkdirSync(path.join(workDir, ".git"), { recursive: true });
+  fs.writeFileSync(path.join(path.dirname(planFile), "2026-11-04-smoke-second.md"), "# Second smoke plan\n");
+  const inProject = JSON.parse(await cli(["error-logs", "--dir", workDir, "--no-open", "--json"], env)).error_logs;
+  assert(inProject.mode === "project" && /\/errors\?project=[0-9a-f]{16}$/.test(inProject.url), `error-logs in a project: ${JSON.stringify(inProject)}`);
+  const projectKey = new URL(inProject.url).searchParams.get("project");
+  const elsewhere = JSON.parse(await cli(["error-logs", "--dir", stateDir, "--no-open", "--json"], env)).error_logs;
+  assert(elsewhere.mode === "sessions-only" && elsewhere.url === `${baseUrl}/errors`, `error-logs elsewhere: ${JSON.stringify(elsewhere)}`);
+  const tabCount = async (u) => ((await (await fetch(u)).text()).match(/role="tab"/g) ?? []).length;
+  assert((await tabCount(inProject.url)) === 4, "a project's /errors has four tabs");
+  assert((await tabCount(`${baseUrl}/errors`)) === 1, "/errors outside a project has only Sessions");
+  const summary = await jsonFetch(`${baseUrl}/api/errors/summary?project=${projectKey}`);
   for (const context of ["session", "plan"]) {
     const c = summary.counts[context];
     assert(c.all === 4 && SEVERITIES.every((s) => c[s] === 1) && c.unrated === 0, `${context} counts: ${JSON.stringify(c)}`);
     const list = await jsonFetch(`${baseUrl}/api/errors?context=${context}`);
     assert(list.total === 4 && list.items.every((i) => i.context === context), `${context} error tab lists 4`);
   }
-  const plans = await jsonFetch(`${baseUrl}/api/plans`);
-  assert(plans.items.length === 1 && plans.items[0].key === planKey && plans.items[0].error_count === 4 && plans.items[0].worst_severity === "send_to_it", `plans tab: ${JSON.stringify(plans.items)}`);
-  assert(summary.plans === 1, "plans tab count");
+  const plans = await jsonFetch(`${baseUrl}/api/projects/${projectKey}/plans`);
+  const opened = plans.items.find((p) => p.name === "smoke-plan.html");
+  const second = plans.items.find((p) => p.name === "2026-11-04-smoke-second.md");
+  assert(plans.items.length === 2 && opened?.review_key === planKey && opened.error_count === 4 && opened.worst_severity === "send_to_it", `plans tab: ${JSON.stringify(plans.items)}`);
+  assert(second?.status === "Not opened" && second.title === "Second smoke plan", `unopened plan: ${JSON.stringify(second)}`);
+  assert(summary.plans === 2, "plans tab count");
   const sessions = await jsonFetch(`${baseUrl}/api/claude-sessions?limit=75`);
   assert(sessions.sessions.length === 2, `sessions tab lists the 2 Claude sessions, got ${sessions.sessions.length}`);
   const planRow = sessions.sessions.find((s) => s.id === PLAN_CLAUDE);

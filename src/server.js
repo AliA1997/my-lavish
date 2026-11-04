@@ -16,7 +16,7 @@ import { isSeverity, needsReason, SEVERITIES } from "./severity.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
 import { ensurePlanHtml, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
-import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, effectiveStage, inferStageFromText, isPlanFile, isStage, nextStage, stageInstructions } from "./stages.js";
+import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, effectiveStage, inferStageFromText, isStage, nextStage, stageInstructions } from "./stages.js";
 import { listRevisions, readRevision, saveRevision } from "./revisions.js";
 import { appendFeedback } from "./feedback-log.js";
 import {
@@ -24,6 +24,8 @@ import {
   requirementsFile, stageFile, updateStage,
 } from "./workflow-store.js";
 import { createHomeHtml } from "./home-page.js";
+import { findProjectRoot, isPlanFileName, listSuperpowersPlans } from "./project.js";
+import { getProject, isProjectKey, listProjects, registerProject } from "./project-store.js";
 import { CONTENT_TYPES, PUBLIC_ASSETS, readAsset } from "./assets.js";
 import { createClaudeSessionLister, findLastPromptAt, findTranscript, readTranscript } from "./claude-log.js";
 import { buildPrompt, claudeStatus as realClaudeStatus, findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
@@ -135,6 +137,7 @@ export function createServer({
   presenceGraceMs = PRESENCE_GRACE_MS,
   connectCooldownMs = CONNECT_COOLDOWN_MS,
   claudeSessionTtlMs = 30000,
+  projectHome = os.homedir(), // D9: never a project root (tests point it elsewhere)
 }) {
   const claudeSessions = createClaudeSessionLister({ ttlMs: claudeSessionTtlMs });
   const app = express();
@@ -438,21 +441,28 @@ export function createServer({
       }
       let result;
       try {
-        result = await store.upsertSession(real, baseUrl, { reopen: Boolean(reopen), source_file: source, stage });
+        result = await openReviewSession(real, { reopen: Boolean(reopen), source_file: source, stage });
       } catch (e) {
         return sendStoreError(res, e);
       }
       const { status, session } = result;
-      if (status === "opened") {
-        await saveRevision(stateDir, session.key, session.revision, { file: session.file, sourceFile: session.source_file }).catch(() => {});
-      }
-      await watchSession(session);
-      notifyHome();
       res.json({ status, key: session.key, url: session.url, stage: session.stage ?? null, stage_source: session.stage_source ?? null });
     } catch (e) {
       next(e);
     }
   });
+
+  /** Creates or resumes the review session for a canonical .html file, as `see-plan <file>` does. */
+  async function openReviewSession(real, { reopen = false, source_file, stage } = {}) {
+    const result = await store.upsertSession(real, baseUrl, { reopen, source_file, stage });
+    const { status, session } = result;
+    if (status === "opened") {
+      await saveRevision(stateDir, session.key, session.revision, { file: session.file, sourceFile: session.source_file }).catch(() => {});
+    }
+    await watchSession(session);
+    notifyHome();
+    return result;
+  }
 
   // ---- the /errors page: error records, plans, Claude sessions (registered before /api/:key/*) ----
 
@@ -559,8 +569,9 @@ export function createServer({
       } catch (e) {
         return sendErrorLogError(res, e);
       }
-      const plans = lookup.sessions.filter((s) => effectiveStage(s) === "plan" && isPlanFile(s.source_file ?? s.file)).length;
-      res.json({ counts: summary.counts, plans: Math.min(plans, 50), error_log: errorLogFile });
+      const project = await projectFor(req.query.project);
+      const plans = project ? (await listSuperpowersPlans(project.root)).total : null;
+      res.json({ counts: summary.counts, plans, project: project ? projectView(project) : null, error_log: errorLogFile });
     } catch (e) {
       next(e);
     }
@@ -596,33 +607,128 @@ export function createServer({
     }
   });
 
-  app.get("/api/plans", async (req, res, next) => {
+  // ---- projects (D9-D13): the CLI registers a project root; the page lists its superpowers plans ----
+
+  const normPath = (p) => (process.platform === "win32" ? String(p).toLowerCase() : String(p));
+
+  function projectView(p) {
+    return { key: p.key, name: p.name, root: p.root, url: `/errors?project=${encodeURIComponent(p.key)}` };
+  }
+
+  /** The registered project for ?project= / :project, or null (unknown or malformed key). */
+  function projectFor(key) {
+    return isProjectKey(key) ? getProject(store, key) : Promise.resolve(null);
+  }
+
+  /** The project's plans (D12), joined with their review sessions and error counts. */
+  async function projectPlans(project) {
+    const [listing, lookup] = await Promise.all([listSuperpowersPlans(project.root), classificationLookup()]);
+    const summary = await errorSummary(lookup);
+    const byFile = new Map(); // a plan file (or the .html made from it) -> its most recently updated review session
+    for (const s of lookup.sessions) {
+      for (const f of [s.source_file, s.file]) {
+        if (typeof f !== "string") continue;
+        const k = normPath(f);
+        const prev = byFile.get(k);
+        if (!prev || String(prev.updated_at ?? "") < String(s.updated_at ?? "")) byFile.set(k, s);
+      }
+    }
+    const items = listing.items.map((p) => {
+      const s = byFile.get(normPath(p.file)) ?? null;
+      const errors = s ? summary.byReview.get(s.key) : null;
+      return {
+        name: p.name,
+        file: p.file,
+        title: p.title || null,
+        created_at: p.created_at,
+        modified_at: p.modified_at,
+        review_key: s?.key ?? null,
+        status: s ? planStatus(s) : "Not opened",
+        stage: s ? effectiveStage(s) : null,
+        error_count: errors?.count ?? 0,
+        worst_severity: errors?.worst ?? null,
+        url: s ? `/session/${encodeURIComponent(s.key)}` : null,
+      };
+    });
+    return { items, total: listing.total };
+  }
+
+  // The only route that takes a directory: the CLI's working directory. Only a D9 project root is registered.
+  app.post("/api/projects", async (req, res, next) => {
+    try {
+      if (isCrossSite(req) || !req.is("application/json")) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Projects are registered by the see-plan CLI"));
+      }
+      const dir = req.body?.dir;
+      if (typeof dir !== "string" || !dir || dir.includes("\0") || dir.length > 4096 || !path.isAbsolute(dir)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "dir must be an absolute path"));
+      }
+      const root = await findProjectRoot(dir, { home: projectHome });
+      if (!root) return res.json({ project: null, url: "/errors" });
+      const view = projectView(await registerProject(store, root));
+      res.json({ project: view, url: view.url });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/projects", async (req, res, next) => {
     try {
       if (refusedCrossSite(req, res)) return;
-      const limit = intParam(req.query.limit, 50, 1, 50);
-      const lookup = await classificationLookup();
-      const summary = await errorSummary(lookup);
-      const names = new Map((await listWorkflows(store)).map((w) => [w.id, w.name]));
-      const plans = lookup.sessions
-        .filter((s) => effectiveStage(s) === "plan" && isPlanFile(s.source_file ?? s.file))
-        .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
-      const items = plans.slice(0, limit).map((s) => {
-        const sum = sessionSummary(s);
-        const errors = summary.byReview.get(s.key);
-        return {
-          key: sum.key,
-          file: sum.file,
-          feature: (s.workflow_id && names.get(s.workflow_id)) || null,
-          status: planStatus(s),
-          archived: Boolean(s.archived),
-          created_at: s.created_at ?? null,
-          updated_at: sum.updated_at,
-          error_count: errors?.count ?? 0,
-          worst_severity: errors?.worst ?? null,
-          url: `/session/${encodeURIComponent(s.key)}`,
-        };
-      });
-      res.json({ items, total: items.length, next_offset: null });
+      const limit = intParam(req.query.limit, 5, 1, 50);
+      res.json({ projects: (await listProjects(store, { limit })).map(projectView) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/projects/:project/plans", async (req, res, next) => {
+    try {
+      if (refusedCrossSite(req, res)) return;
+      const project = await projectFor(req.params.project);
+      if (!project) return res.status(404).json(errorBody("NOT_FOUND", "Unknown project"));
+      touchIdle();
+      const plans = await projectPlans(project);
+      res.json({ project: projectView(project), items: plans.items, total: plans.total, next_offset: null });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/projects/:project/plans/open", async (req, res, next) => {
+    try {
+      if (!requireSameOrigin(req)) {
+        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Plans are opened from the error log page"));
+      }
+      const project = await projectFor(req.params.project);
+      if (!project) return res.status(404).json(errorBody("NOT_FOUND", "Unknown project"));
+      const name = req.body?.name;
+      if (!isPlanFileName(name)) return res.status(400).json(errorBody("VALIDATION_ERROR", "name must be a plan file name"));
+      // Only a file in the current listing: never a path built from what the client sent.
+      const plan = (await listSuperpowersPlans(project.root)).items.find((p) => p.name === name);
+      if (!plan) return res.status(404).json(errorBody("NOT_FOUND", "No such plan in this project"));
+      let real;
+      let source;
+      try {
+        if (isMarkdownPath(plan.file)) {
+          source = await canonicalFile(plan.file);
+          real = await canonicalFile((await ensurePlanHtml(source)).htmlPath);
+        } else {
+          await assertHtmlFile(plan.file);
+          real = await canonicalFile(plan.file);
+        }
+      } catch (e) {
+        if (e.code === "VALIDATION_ERROR") return res.status(400).json(errorBody("VALIDATION_ERROR", e.message));
+        throw e;
+      }
+      let result;
+      try {
+        result = await openReviewSession(real, { source_file: source });
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      const { status, session } = result;
+      res.json({ status, key: session.key, url: `/session/${encodeURIComponent(session.key)}`, stage: session.stage ?? null });
     } catch (e) {
       next(e);
     }
@@ -1596,16 +1702,29 @@ export function createServer({
     res.type("html").send(createHomeHtml({ baseUrl }));
   });
 
-  app.get("/claude", (req, res) => {
-    res.set("X-Frame-Options", "DENY");
-    res.set("Content-Security-Policy", "frame-ancestors 'none'");
-    res.type("html").send(createLogsHtml({ baseUrl }));
+  app.get("/claude", async (req, res, next) => {
+    try {
+      res.set("X-Frame-Options", "DENY");
+      res.set("Content-Security-Policy", "frame-ancestors 'none'");
+      const project = await projectFor(req.query.project);
+      res.type("html").send(createLogsHtml({ baseUrl, projectKey: project?.key ?? null }));
+    } catch (e) {
+      next(e);
+    }
   });
 
-  app.get("/errors", (req, res) => {
-    res.set("X-Frame-Options", "DENY");
-    res.set("Content-Security-Policy", "frame-ancestors 'none'");
-    res.type("html").send(createErrorsHtml({ baseUrl }));
+  // D10/D13: with a registered ?project= the page has four tabs; without one, only Sessions.
+  app.get("/errors", async (req, res, next) => {
+    try {
+      res.set("X-Frame-Options", "DENY");
+      res.set("Content-Security-Policy", "frame-ancestors 'none'");
+      const asked = typeof req.query.project === "string" && req.query.project !== "";
+      const project = await projectFor(req.query.project);
+      const recentProjects = project ? [] : (await listProjects(store, { limit: 5 })).map(projectView);
+      res.type("html").send(createErrorsHtml({ baseUrl, project: project ? projectView(project) : null, recentProjects, unknownProject: asked && !project }));
+    } catch (e) {
+      next(e);
+    }
   });
 
   app.get("/artifact/:key/index.html", async (req, res, next) => {

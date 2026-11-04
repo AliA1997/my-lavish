@@ -336,6 +336,39 @@ test("logs prints the Claude log page; bare see-plan opens it only from a termin
   assert.equal(JSON.parse(human.stdout()).claude_logs, logs.url);
 });
 
+test("error-logs registers a project folder; elsewhere it shows only sessions; bare see-plan prints it", async (t) => {
+  const { dir, env } = await mdEnv(t);
+  const base = `http://127.0.0.1:${env.MY_LAVISH_PORT}`;
+  const repo = path.join(dir, "repo");
+  await fs.promises.mkdir(path.join(repo, ".git"), { recursive: true });
+  await fs.promises.mkdir(path.join(repo, "src"), { recursive: true });
+  const p = fakeIo(env);
+  assert.equal(await run(["error-logs", "--dir", path.join(repo, "src"), "--json"], p.io), 0);
+  const { error_logs: inProject, next_step } = JSON.parse(p.stdout());
+  assert.equal(inProject.mode, "project");
+  assert.equal(inProject.status, "ready");
+  assert.equal(inProject.project.name, "repo");
+  assert.match(inProject.url, new RegExp(`^${base}/errors\\?project=[0-9a-f]{16}$`));
+  assert.match(next_step, /quoted data/);
+  const html = await (await fetch(inProject.url)).text();
+  assert.equal(html.match(/role="tab"/g).length, 4);
+
+  const plain = path.join(dir, "plain");
+  await fs.promises.mkdir(plain, { recursive: true });
+  const n = fakeIo(env);
+  assert.equal(await run(["error-logs", "--dir", plain, "--json"], n.io), 0);
+  const out = JSON.parse(n.stdout());
+  assert.deepEqual([out.error_logs.mode, out.error_logs.url, out.error_logs.project], ["sessions-only", `${base}/errors`, undefined]);
+  assert.match(out.next_step, /only recent sessions/);
+  assert.equal((await (await fetch(out.error_logs.url)).text()).match(/role="tab"/g).length, 1);
+
+  const human = fakeIo(env);
+  human.io.stdout.isTTY = true;
+  assert.equal(await run(["--json"], human.io), 0);
+  assert.ok(JSON.parse(human.stdout()).error_logs.startsWith(`${base}/errors`));
+  assert.ok(HOME_USAGE.includes("see-plan error-logs"));
+});
+
 test("poll defaults to 110000 ms under Claude Code; explicit --timeout-ms wins", async (t) => {
   const { dir, file } = await tmpHtml(t);
   const bodies = [];

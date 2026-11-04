@@ -121,6 +121,7 @@ export const HOME_USAGE = [
   "see-plan design               page design rules",
   "see-plan playbook [id]        page recipes: plan, diagram, table, comparison, input, interrogation, progress, verification",
   "see-plan logs                 open the newest Claude session's log in the browser",
+  "see-plan error-logs           open the error log tabs: in a project, session and plan errors, its superpowers plans and sessions; elsewhere, recent sessions only (--dir, --no-open)",
   "see-plan stop                 stop the local server",
   "flags: --json, --no-open, --reopen, --with-claude, --agent, --stage <name>, --claude-session <id>, --timeout-ms <ms>, --agent-reply <text>, --agent-reply-file <file|->, --requirements <file|->, --dir <dir>, --dry-run, --version, --help",
 ].join("\n");

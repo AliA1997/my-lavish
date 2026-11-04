@@ -57,7 +57,7 @@ node bin/see-plan.js poll examples/plan.html   # in a second terminal: waits for
 node bin/see-plan.js stop                  # when done
 ```
 
-To see your Claude sessions, run `see-plan` with no file in a terminal (or `see-plan logs` from anywhere). The browser opens the **Claude log page** at `http://127.0.0.1:4388/claude`. No plan is shown. The top line is the newest Claude Code session's id and the date of its last prompt, and the page below is that session's log, updating live. **Recent sessions** switches to any of your 20 latest sessions. Click an entry to log it as an error: a dialog shows the entry, asks you to pick a **severity** and *Why is this an error?*, and **Log as error** adds it to `~/claude-errors/error-log.json`. The **Error logs** page (`/errors`) lists everything logged (see [Error logs](#error-logs)).
+To see your Claude sessions, run `see-plan` with no file in a terminal (or `see-plan logs` from anywhere). The browser opens the **Claude log page** at `http://127.0.0.1:4388/claude`. No plan is shown. The top line is the newest Claude Code session's id and the date of its last prompt, and the page below is that session's log, updating live. **Recent sessions** switches to any of your 20 latest sessions. Click an entry to log it as an error: a dialog shows the entry, asks you to pick a **severity** and *Why is this an error?*, and **Log as error** adds it to `~/claude-errors/error-log.json`. `see-plan error-logs` lists everything logged (see [Error logs](#error-logs)).
 
 To attach a session from the command line instead, pass its id (the file name of a `~/.claude/projects/<project>/<id>.jsonl`):
 
@@ -144,7 +144,7 @@ One background server is started on demand and reused by later commands. A sessi
 
 | Command | What it does |
 | --- | --- |
-| `see-plan` | Lists known sessions and usage. Run in a terminal, it also prints the Claude log page URL (it never opens a browser) |
+| `see-plan` | Lists known sessions and usage. Run in a terminal, it also prints the Claude log page URL and the `error_logs` URL for the current folder (it never opens a browser) |
 | `see-plan <file.html|file.md>` / `open <file>` | A `.md` plan is converted to a sibling `.html` (regenerated when the `.md` is newer, never over a hand-written `.html`); agents edit the `.md`. Opens (or reopens) the session and the browser. A session the user ended is refused unless `--reopen` is given |
 | `poll <file>` | Blocks until the user sends feedback or ends the session; prints prompts, `next_step`, and a DOM snapshot |
 | `poll <file> --agent-reply "<text>"` | Posts a reply to the chat, then polls |
@@ -156,6 +156,7 @@ One background server is started on demand and reused by later commands. A sessi
 | `feature status <name>` | The feature's stages and current stage |
 | `prune` | Removes sessions whose file no longer exists (`--dry-run` lists them) |
 | `logs` | Opens the Claude log page (newest Claude session's log) in the browser; with `--no-open`, prints its URL |
+| `error-logs` | Opens the error-log tabs for the current folder (`--dir` for another). In a project: Session and Plan Error Logs, its superpowers plans and Sessions. Elsewhere: only recent Sessions. See [Error logs](#error-logs) |
 | `stop` | Stops the background server |
 | `design` | Prints the design rules for artifacts |
 | `playbook [id]` | Lists playbooks, or prints one (`plan`, `diagram`, `table`, `comparison`, `input`, `interrogation`, `progress`, `verification`) |
@@ -183,11 +184,16 @@ Every output includes a `next_step` telling the agent what to do next.
 
 ## Error logs
 
-The **Error logs** page (`/errors`, linked from the dashboard and the Claude log page) has four tabs. The URL keeps the open tab (`#session-errors`, `#plan-errors`, `#plans`, `#sessions`), and the arrow keys, Home and End move between them.
+Run **`see-plan error-logs`** (or `--dir <path>`) to open the error-log view for the folder you are in. Bare `see-plan` in a terminal prints the same link as `error_logs`. What you see depends on where you start it:
+
+- **In a project folder**, meaning the nearest folder above you that has `.git`, `docs/superpowers/` or `.superpowers/` (your home folder never counts), the page (`/errors?project=<key>`) has **four tabs**.
+- **Anywhere else**, the page (`/errors`) shows **only the Sessions tab**, plus links to projects you opened before.
+
+The URL keeps the open tab (`#session-errors`, `#plan-errors`, `#plans`, `#sessions`), and the arrow keys, Home and End move between tabs.
 
 - **Session Error Logs**: errors logged from ordinary sessions, with severity, the entry (expandable to its full text), the reason, the Claude session and when it was logged. Chips filter by severity; **Load more** pages by 50.
 - **Plan Error Logs**: the same, for errors logged from a planning session (a Claude session attached to a review session whose stage is Plan), plus the plan file.
-- **Plans**: the 50 most recently created plans (plan-stage review sessions in `docs/superpowers/plans/` or `specs/`, a `plans` or `specs` folder, or a feature's `*.plan.md`), with status (Open, Needs changes, Approved, Ended, Archived) and error counts.
+- **Plans**: the 50 most recently created **superpowers plans** in the project's `docs/superpowers/plans/` (dated by their `YYYY-MM-DD-` prefix, otherwise by file creation time), with title, status (Not opened, Open, Needs changes, Approved, Ended, Archived) and error counts. **Open** starts a review session for a plan that isn't open yet.
 - **Sessions**: the 75 most recent Claude sessions, with the attached review session and stage and their error counts.
 
 Each error has a severity:
@@ -199,7 +205,7 @@ Each error has a severity:
 | High | A plan that went badly off course; a sign of lost context ("lost in the middle"). | Red | required |
 | Send to IT | Malicious code, or work that ran without supervision. | Red velvet | required |
 
-Whether an error is a plan or a session error is worked out by the server when it is logged, from the Claude session id alone. Records logged before 0.3.0 have no severity and show as **Unrated**; each can be given a severity once with **Rate…**. *Send to IT* is a label only: nothing is sent anywhere. Records are otherwise never edited.
+Whether an error is a plan or a session error is worked out by the server when it is logged, from the Claude session id alone. Records logged before severities existed (0.2.x) show as **Unrated**; each can be given a severity once with **Rate…**. *Send to IT* is a label only: nothing is sent anywhere. Records are otherwise never edited.
 
 ## Environment variables
 

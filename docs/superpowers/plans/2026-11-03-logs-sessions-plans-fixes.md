@@ -1,6 +1,6 @@
 # see-plan: log hand-off, session management, error-log confirmation, plan management
 
-Date: 2026-11-03 · Status: **interrogated 2026-11-03, ready to implement** · Task 1 shipped in 0.2.1; Task 3's session cache and Task 4's plan-folder inference shipped early in 0.3.0 (see `2026-11-04-error-log-tabs-severity.md`); the rest of Tasks 2–4 moves to **0.4.0** · Version at time of writing: 0.2.0 (repo `main` @ 020acbf, installed binary `~/.see-plan/bin/see-plan` 0.2.0)
+Date: 2026-11-03 · Status: **interrogated 2026-11-03, ready to implement** · Task 1 shipped in 0.2.1; Task 3's session cache and Task 4's plan-folder inference shipped early in 0.3.0 (reverted) and again in 3.2.0 (see `2026-11-04-project-aware-error-tabs.md`); the rest of Tasks 2–4 moves to **3.3.0** · Version at time of writing: 0.2.0 (repo `main` @ 020acbf, installed binary `~/.see-plan/bin/see-plan` 0.2.0)
 
 ## Goal
 

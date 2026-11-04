@@ -215,6 +215,6 @@ test("the errors page script builds the DOM with textContent only", async (t) =>
   const { baseUrl } = await setup(t);
   const client = await fetchAsset(baseUrl, "errors-client.js");
   assert.ok(!client.includes("innerHTML"));
-  for (const route of ["/api/errors/summary", "/api/errors/record", "/api/errors/rate", "/api/plans?limit=50", "/api/claude-sessions?limit=75"]) assert.ok(client.includes(route), route);
-  for (const key of ["ArrowRight", "ArrowLeft", "Home", "End", "encodeURIComponent", "document.hidden"]) assert.ok(client.includes(key), key);
+  for (const route of ["/api/errors/summary", "/api/errors/record", "/api/errors/rate", "/api/projects/", "/plans/open", "/api/claude-sessions?limit=75"]) assert.ok(client.includes(route), route);
+  for (const key of ["ArrowRight", "ArrowLeft", "Home", "End", "encodeURIComponent", "document.hidden", "data-project", '[role="tab"]']) assert.ok(client.includes(key), key);
 });

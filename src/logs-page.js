@@ -7,7 +7,8 @@ export function severityOptions(name) {
 }
 
 /** The full-page Claude log view: no plan, just the newest (or chosen) Claude session's transcript. */
-export function createLogsHtml({ baseUrl } = {}) {
+export function createLogsHtml({ baseUrl, projectKey = null } = {}) {
+  const errorsHref = projectKey ? `/errors?project=${encodeURIComponent(projectKey)}` : "/errors";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -17,7 +18,7 @@ export function createLogsHtml({ baseUrl } = {}) {
 <link rel="stylesheet" href="/logs.css">
 </head>
 <body data-base-url="${escapeHtml(baseUrl ?? "")}">
-<nav id="pageNav" aria-label="Pages"><a href="/">Dashboard</a> <a href="/errors">Error logs</a></nav>
+<nav id="pageNav" aria-label="Pages"><a href="/">Dashboard</a> <a href="${escapeHtml(errorsHref)}">Error logs</a></nav>
 <header id="top">
   <div id="identity">
     <p class="eyebrow">Claude session</p>

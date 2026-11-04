@@ -17,10 +17,10 @@ async function world(t, { transcripts = 3, opts = {} } = {}) {
   const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-tabs-"));
   t.after(() => fs.promises.rm(tmp, { recursive: true, force: true }));
   const claudeDir = path.join(tmp, "claude");
-  const project = path.join(claudeDir, "projects", "C--repo");
-  await fs.promises.mkdir(project, { recursive: true });
+  const claudeProject = path.join(claudeDir, "projects", "C--repo");
+  await fs.promises.mkdir(claudeProject, { recursive: true });
   for (let n = 1; n <= transcripts; n++) {
-    const file = path.join(project, `${id(n)}.jsonl`);
+    const file = path.join(claudeProject, `${id(n)}.jsonl`);
     await fs.promises.writeFile(file, JSON.stringify({ type: "user", cwd: "/repo", message: { content: `session ${n}` } }) + "\n");
     const when = new Date(Date.now() - n * 60000);
     await fs.promises.utimes(file, when, when);
@@ -28,7 +28,7 @@ async function world(t, { transcripts = 3, opts = {} } = {}) {
   const stateDir = path.join(tmp, "state");
   const store = new SessionStore(stateDir);
   const errorLogFile = path.join(tmp, "errors", "error-log.json");
-  const srv = createServer({ store, stateDir, port: 0, version: "0.3.0", claudeDir, errorLogFile, presenceGraceMs: 0, ...opts });
+  const srv = createServer({ store, stateDir, port: 0, version: "3.2.0", claudeDir, errorLogFile, presenceGraceMs: 0, projectHome: tmp, ...opts });
   const { baseUrl } = await srv.listen();
   t.after(() => srv.close());
   const repo = path.join(tmp, "repo");
@@ -52,7 +52,15 @@ async function world(t, { transcripts = 3, opts = {} } = {}) {
     const res = await post("/api/claude-errors", { entry: e });
     return { status: res.status, body: await res.json() };
   }
-  return { tmp, baseUrl, store, errorLogFile, post, get, open, entry, log };
+  /** Makes tmp/repo a project (a .git folder), registers it and returns its key. */
+  async function project() {
+    await fs.promises.mkdir(path.join(repo, ".git"), { recursive: true });
+    const res = await post("/api/projects", { dir: repo }, {});
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    return body.project.key;
+  }
+  return { tmp, repo, baseUrl, store, errorLogFile, post, get, open, entry, log, project };
 }
 
 test("isSeverity takes only the four ids, never prototype keys", () => {
@@ -225,11 +233,11 @@ test("GET /api/errors filters, validates, pages and previews; record and summary
   }
 
   const summary = await get("/api/errors/summary");
+  assert.equal(summary.body.plans, null, "no project: no plan count");
   assert.deepEqual(summary.body.counts.session, { all: 5, low: 3, medium: 2, high: 0, send_to_it: 0, unrated: 0 });
   assert.deepEqual(summary.body.counts.plan, { all: 1, low: 0, medium: 0, high: 0, send_to_it: 1, unrated: 0 });
-  assert.equal(summary.body.plans, 1);
 
-  for (const p of ["/api/errors", "/api/errors/summary", `/api/errors/record?claude_session_id=${C}&uuid=a&part=0`, "/api/plans", "/api/claude-sessions"]) {
+  for (const p of ["/api/errors", "/api/errors/summary", `/api/errors/record?claude_session_id=${C}&uuid=a&part=0`, "/api/projects", "/api/claude-sessions"]) {
     assert.equal((await get(p, { "Sec-Fetch-Site": "cross-site" })).status, 403, p);
   }
 });
@@ -242,37 +250,80 @@ test("planStatus maps review session states; archived wins", () => {
   assert.equal(planStatus({ status: "ended", ended_by: "approved", archived: true }), "Archived");
 });
 
-test("GET /api/plans: plan-folder plans only, newest first, capped at 50, with error counts", async (t) => {
-  const { open, get, store, log, entry } = await world(t);
-  const keys = [];
-  for (let i = 0; i < 51; i++) keys.push(await open(`docs/superpowers/plans/p${String(i).padStart(2, "0")}.html`));
-  const outside = await open("notes/feature-plan.html");
-  await open("notes/x.plan.html"); // not *.plan.md and not in a plan folder
+test("the project Plans tab lists docs/superpowers/plans files, joined with review sessions and error counts", async (t) => {
+  const { open, get, store, log, entry, project, repo } = await world(t);
+  const key = await project();
+  const dir = path.join(repo, "docs", "superpowers", "plans");
+  await fs.promises.mkdir(dir, { recursive: true });
+  for (let i = 1; i <= 52; i++) await fs.promises.writeFile(path.join(dir, `2026-01-${String((i % 28) + 1).padStart(2, "0")}-p${String(i).padStart(2, "0")}.md`), `# Plan ${i}\n`);
+  await fs.promises.writeFile(path.join(dir, "2026-02-01-new.md"), "# Newest plan\n");
+  const opened = await open("docs/superpowers/plans/2026-02-02-opened.html", A);
+  await open("notes/feature-plan.html"); // a plan outside the plans folder is not listed
   await store.transact((state) => {
-    keys.forEach((k, i) => {
-      state.sessions[k].created_at = new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString();
-    });
-    state.sessions[keys[50]].status = "ended";
-    state.sessions[keys[50]].ended_by = "approved";
-    state.sessions[keys[49]].archived = true;
-    state.sessions[keys[48]].status = "feedback";
-    state.sessions[keys[50]].claude_session_id = A;
+    state.sessions[opened].status = "ended";
+    state.sessions[opened].ended_by = "approved";
     return [null, true];
   });
-  assert.equal((await get(`/api/sessions`)).status, 200);
   await log(entry(A, { severity: "high", reason: "off course" }));
   await log(entry(A, { severity: "low" }));
 
-  const { status, body } = await get("/api/plans?limit=500");
+  const { status, body } = await get(`/api/projects/${key}/plans`);
   assert.equal(status, 200);
-  assert.equal(body.items.length, 50, "a 51st plan is not returned");
-  assert.ok(!body.items.some((p) => p.key === outside), "a plan-stage file outside the plan folders is left out");
-  assert.equal(body.items[0].key, keys[50], "newest created first");
-  assert.ok(!body.items.some((p) => p.key === keys[0]), "the oldest drops off");
-  assert.deepEqual(body.items.slice(0, 4).map((p) => p.status), ["Approved", "Archived", "Needs changes", "Open"]);
-  assert.deepEqual([body.items[0].error_count, body.items[0].worst_severity, body.items[0].url], [2, "high", `/session/${keys[50]}`]);
-  assert.equal(body.items[1].archived, true);
-  assert.equal(body.items[0].feature, null);
+  assert.equal(body.items.length, 50, "capped at 50");
+  assert.equal(body.total, 50);
+  assert.deepEqual(body.items.slice(0, 2).map((p) => p.name), ["2026-02-02-opened.html", "2026-02-01-new.md"], "newest created first");
+  const [first, second] = body.items;
+  assert.deepEqual([first.status, first.error_count, first.worst_severity, first.url, first.stage], ["Approved", 2, "high", `/session/${opened}`, "plan"]);
+  assert.deepEqual([second.status, second.title, second.review_key, second.url], ["Not opened", "Newest plan", null, null]);
+  assert.ok(!body.items.some((p) => p.name.includes("feature-plan")));
+  assert.equal((await get(`/api/errors/summary?project=${key}`)).body.plans, 50);
+  assert.equal((await get(`/api/projects/${key}/plans`, { "Sec-Fetch-Site": "cross-site" })).status, 403);
+  assert.equal((await get("/api/projects/0123456789abcdef/plans")).status, 404, "an unregistered key");
+  assert.equal((await get("/api/projects/__proto__/plans")).status, 404, "a malformed key");
+});
+
+test("Open on a plan creates its review session (stage plan); only names in the listing are accepted", async (t) => {
+  const { post, get, project, repo } = await world(t);
+  const key = await project();
+  const dir = path.join(repo, "docs", "superpowers", "plans");
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.writeFile(path.join(dir, "2026-03-01-a.md"), "# A\n");
+  await fs.promises.writeFile(path.join(repo, "secret.md"), "# not a plan\n");
+  for (const name of ["../../secret.md", "..\\secret.md", "/etc/passwd", "2026-03-01-a.txt", "", 5]) {
+    const r = await post(`/api/projects/${key}/plans/open`, { name });
+    assert.equal(r.status, 400, String(name));
+  }
+  assert.equal((await post(`/api/projects/${key}/plans/open`, { name: "missing.md" })).status, 404);
+  assert.equal((await post(`/api/projects/${key}/plans/open`, { name: "2026-03-01-a.md" }, {})).status, 403, "needs the page's origin");
+  assert.equal((await post(`/api/projects/${key}/plans/open`, { name: "2026-03-01-a.md" }, { Origin: "http://evil.test" })).status, 403);
+  const res = await post(`/api/projects/${key}/plans/open`, { name: "2026-03-01-a.md" });
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.match(body.key, /^[0-9a-f]{16}$/);
+  assert.deepEqual([body.url, body.stage], [`/session/${body.key}`, "plan"]);
+  assert.ok(fs.existsSync(path.join(dir, "2026-03-01-a.html")), "the HTML is generated next to the Markdown");
+  const listed = (await get(`/api/projects/${key}/plans`)).body.items;
+  assert.deepEqual(listed.map((p) => [p.name, p.status, p.review_key]), [["2026-03-01-a.md", "Open", body.key]], "the generated .html is not listed twice");
+});
+
+test("POST /api/projects registers only project roots; non-project folders and cross-site requests are refused", async (t) => {
+  const { post, get, tmp, repo } = await world(t);
+  const plain = path.join(tmp, "plain", "deep");
+  await fs.promises.mkdir(plain, { recursive: true });
+  const none = await (await post("/api/projects", { dir: plain }, {})).json();
+  assert.deepEqual(none, { project: null, url: "/errors" });
+  await fs.promises.mkdir(path.join(repo, ".git"), { recursive: true });
+  await fs.promises.mkdir(path.join(repo, "src", "lib"), { recursive: true });
+  const nested = await (await post("/api/projects", { dir: path.join(repo, "src", "lib") }, {})).json();
+  assert.equal(nested.project.name, "repo");
+  assert.equal(nested.project.root, await fs.promises.realpath(repo));
+  assert.equal(nested.url, `/errors?project=${nested.project.key}`);
+  const again = await (await post("/api/projects", { dir: repo }, {})).json();
+  assert.equal(again.project.key, nested.project.key, "the key is stable");
+  assert.deepEqual((await get("/api/projects")).body.projects.map((p) => p.key), [nested.project.key]);
+  for (const dir of ["relative/path", "", 7, null]) assert.equal((await post("/api/projects", { dir }, {})).status, 400, String(dir));
+  assert.equal((await post("/api/projects", { dir: repo }, { "Sec-Fetch-Site": "cross-site" })).status, 403);
+  assert.equal((await post("/api/projects", { dir: repo }, { Origin: "http://evil.test" })).status, 403);
 });
 
 test("GET /api/claude-sessions: limit up to 75, with review session, stage and error counts", async (t) => {
@@ -291,21 +342,40 @@ test("GET /api/claude-sessions: limit up to 75, with review session, stage and e
   assert.deepEqual([b.review_key, b.stage, b.error_count, b.worst_severity], [null, null, 0, null]);
 });
 
-test("the /errors page has four ARIA tabs and is linked from the dashboard and /claude", async (t) => {
-  const { baseUrl } = await world(t);
+test("/errors: four ARIA tabs in a project; only Sessions outside one (D13)", async (t) => {
+  const { baseUrl, project } = await world(t);
   const res = await fetch(`${baseUrl}/errors`);
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("x-frame-options"), "DENY");
-  const html = await res.text();
+  const none = await res.text();
+  assert.equal(none.match(/role="tab"/g).length, 1);
+  assert.equal(none.match(/role="tabpanel"/g).length, 1);
+  assert.ok(none.includes('aria-controls="panel-sessions"'));
+  for (const tab of ["session-errors", "plan-errors", "plans"]) assert.ok(!none.includes(`panel-${tab}`), `no ${tab} panel`);
+  assert.ok(none.includes('data-mode="sessions-only"') && none.includes("see-plan error-logs"));
+
+  const key = await project();
+  const html = await (await fetch(`${baseUrl}/errors?project=${key}`)).text();
   assert.ok(html.includes('role="tablist"'));
   assert.equal(html.match(/role="tab"/g).length, 4);
   assert.equal(html.match(/role="tabpanel"/g).length, 4);
-  for (const t of ["Session Error Logs", "Plan Error Logs", "Plans", "Sessions"]) assert.ok(html.includes(t), t);
+  for (const name of ["Session Error Logs", "Plan Error Logs", "Plans", "Sessions"]) assert.ok(html.includes(name), name);
   for (const h of ["session-errors", "plan-errors", "plans", "sessions"]) assert.ok(html.includes(`aria-controls="panel-${h}"`), h);
+  assert.ok(html.includes(`data-project="${key}"`) && html.includes("Project: <strong"));
+  assert.ok(html.includes(`href="/claude?project=${key}"`));
   assert.ok(html.includes('src="/errors-client.js"') && html.includes('href="/errors.css"'));
+
+  const listed = await (await fetch(`${baseUrl}/errors`)).text();
+  assert.ok(listed.includes(`href="/errors?project=${key}"`), "recent projects are linked in sessions-only mode");
+  const unknown = await (await fetch(`${baseUrl}/errors?project=0123456789abcdef`)).text();
+  assert.equal(unknown.match(/role="tab"/g).length, 1);
+  assert.ok(unknown.includes("isn't registered"));
+  assert.equal((await (await fetch(`${baseUrl}/errors?project=%3Cscript%3E`)).text()).match(/role="tab"/g).length, 1);
+
   assert.ok((await (await fetch(`${baseUrl}/`)).text()).includes('href="/errors"'));
   const claude = await (await fetch(`${baseUrl}/claude`)).text();
   assert.ok(claude.includes('href="/errors"') && claude.includes('href="/"'));
+  assert.ok((await (await fetch(`${baseUrl}/claude?project=${key}`)).text()).includes(`href="/errors?project=${key}"`));
 });
 
 test("timing budgets: /api/errors warm under 50ms with 2,000 records; sessions warm under 100ms, cold under 1.5s", async (t) => {
@@ -334,7 +404,7 @@ test("timing budgets: /api/errors warm under 50ms with 2,000 records; sessions w
 });
 
 test("an unlabeled session from before 0.3.0 still counts as a plan by its path, without being rewritten", async (t) => {
-  const { open, get, store, log, entry } = await world(t);
+  const { open, get, store, log, entry, project } = await world(t);
   const planKey = await open("docs/superpowers/plans/old.html", A);
   const otherKey = await open("notes/old.html", B);
   // Sessions created before path inference have no stage until they are resumed.
@@ -345,9 +415,9 @@ test("an unlabeled session from before 0.3.0 still counts as a plan by its path,
     }
     return [null, true];
   });
-  const plans = await get("/api/plans");
-  assert.deepEqual(plans.body.items.map((p) => p.key), [planKey]);
-  assert.equal((await get("/api/errors/summary")).body.plans, 1);
+  const key = await project();
+  const plans = (await get(`/api/projects/${key}/plans`)).body.items;
+  assert.deepEqual(plans.map((p) => [p.review_key, p.stage]), [[planKey, "plan"]]);
   assert.equal((await log(entry(A))).status, 200);
   assert.equal((await log(entry(B))).status, 200);
   assert.deepEqual((await get("/api/errors?context=plan")).body.items.map((i) => [i.review_key, i.stage]), [[planKey, "plan"]]);

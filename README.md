@@ -57,7 +57,7 @@ node bin/see-plan.js poll examples/plan.html   # in a second terminal: waits for
 node bin/see-plan.js stop                  # when done
 ```
 
-To see your Claude sessions, run `see-plan` with no file in a terminal (or `see-plan logs` from anywhere). The browser opens the **Claude log page** at `http://127.0.0.1:4388/claude`. No plan is shown. The top line is the newest Claude Code session's id and the date of its last prompt, and the page below is that session's log, updating live. **Recent sessions** switches to any of your 20 latest sessions. Click an entry to log it as an error: a dialog shows the entry and asks *Why is this an error? (optional)*, and **Log as error** adds it to `~/claude-errors/error-log.json`.
+To see your Claude sessions, run `see-plan` with no file in a terminal (or `see-plan logs` from anywhere). The browser opens the **Claude log page** at `http://127.0.0.1:4388/claude`. No plan is shown. The top line is the newest Claude Code session's id and the date of its last prompt, and the page below is that session's log, updating live. **Recent sessions** switches to any of your 20 latest sessions. Click an entry to log it as an error: a dialog shows the entry, asks you to pick a **severity** and *Why is this an error?*, and **Log as error** adds it to `~/claude-errors/error-log.json`. The **Error logs** page (`/errors`) lists everything logged (see [Error logs](#error-logs)).
 
 To attach a session from the command line instead, pass its id (the file name of a `~/.claude/projects/<project>/<id>.jsonl`):
 
@@ -177,9 +177,29 @@ Every output includes a `next_step` telling the agent what to do next.
 - **Stage menu** in the header labels the session. A label inferred from your words or the file name shows *(inferred) · Confirm*; inference never overrides a label you or the agent set.
 - **Claude log** tab shows that session's transcript (`~/.claude/projects/*/<session-id>.jsonl`, or `$CLAUDE_CONFIG_DIR`). A Claude agent's poll attaches its own session when none is attached yet (it never replaces one you picked); `--claude-session <uuid>` always sets it. Each refresh reads at most 256 KB and the tab keeps the last 500 entries.
 - With no session attached, or one with no transcript (such as a Connect Claude launch that never started), the tab lists the **20 most recent Claude sessions**, newest first. Each is titled by its `/rename` title or first prompt; built-in commands such as `/clear` or `/model` are skipped. Click one to show its log, or paste an id. **Change session** reopens the list.
-- **Click a log entry** to open a small note box: **Send to agent** (a `claude-log` note with your text), **Log as error** (the server appends it to `~/claude-errors/error-log.json`, with your text saved as the `reason`), or **Both**. The agent is never asked to write files. A sent entry is marked. Select text inside an entry to copy it instead.
-- **Claude log page** (`/claude`, opened by `see-plan logs`): the newest Claude session's id and last-prompt date on top, its log below, and a **Recent sessions** menu for the other 19. The log loads at least 200 entries when the session has that many (reading up to 16 MB back), then updates live. Add `?id=<uuid>` to the URL to open a given session. No agent is involved here: clicking an entry opens a confirmation dialog with a preview and an optional reason (up to 2,000 characters). **Log as error** (or Ctrl/Cmd+Enter) makes the server append it (session id, line `uuid`, part, role, kind, time, text, `reason`, `reported_at`) to `~/claude-errors/error-log.json` itself; Esc cancels. Clicking an entry that is already logged shows its saved reason, read-only: the first reason is kept and can't be edited. It creates the file if missing, keeps the records already there, skips an entry that is already logged, and refuses to touch a file that is not a JSON array.
+- **Click a log entry** to open a small note box: **Send to agent** (a `claude-log` note with your text), **Log as error** (the server appends it to `~/claude-errors/error-log.json` with the severity you pick in the box, and your text saved as the `reason`), or **Both**. *Log as error* and *Both* need a severity; High and Send to IT also need a note. The agent is never asked to write files. A sent entry is marked. Select text inside an entry to copy it instead.
+- **Claude log page** (`/claude`, opened by `see-plan logs`): the newest Claude session's id and last-prompt date on top, its log below, and a **Recent sessions** menu for the other 19. The log loads at least 200 entries when the session has that many (reading up to 16 MB back), then updates live. Add `?id=<uuid>` to the URL to open a given session. No agent is involved here: clicking an entry opens a confirmation dialog with a preview, a required **severity** (keys 1–4 pick one) and a reason (up to 2,000 characters; required for High and Send to IT). **Log as error** (or Ctrl/Cmd+Enter) makes the server append it (session id, line `uuid`, part, role, kind, time, text, `reason`, `severity`, `context`, `review_key`, `stage`, `reported_at`) to `~/claude-errors/error-log.json` itself; Esc cancels. Clicking an entry that is already logged shows its saved reason and severity, read-only: the first ones are kept. Logged entries carry a severity badge. The page header links to the dashboard and the **Error logs** page. It creates the file if missing, keeps the records already there, skips an entry that is already logged, and refuses to touch a file that is not a JSON array.
 - Every local process is trusted: the server has no token, so any process on this machine can attach a session id or trigger a launch. Do not run it on a shared machine.
+
+## Error logs
+
+The **Error logs** page (`/errors`, linked from the dashboard and the Claude log page) has four tabs. The URL keeps the open tab (`#session-errors`, `#plan-errors`, `#plans`, `#sessions`), and the arrow keys, Home and End move between them.
+
+- **Session Error Logs**: errors logged from ordinary sessions, with severity, the entry (expandable to its full text), the reason, the Claude session and when it was logged. Chips filter by severity; **Load more** pages by 50.
+- **Plan Error Logs**: the same, for errors logged from a planning session (a Claude session attached to a review session whose stage is Plan), plus the plan file.
+- **Plans**: the 50 most recently created plans (plan-stage review sessions in `docs/superpowers/plans/` or `specs/`, a `plans` or `specs` folder, or a feature's `*.plan.md`), with status (Open, Needs changes, Approved, Ended, Archived) and error counts.
+- **Sessions**: the 75 most recent Claude sessions, with the attached review session and stage and their error counts.
+
+Each error has a severity:
+
+| Severity | Meaning | Color | Reason |
+| --- | --- | --- | --- |
+| Low | Minor miscommunication between the human and the AI. | Orange | optional |
+| Medium | Wrote buggy code, or a plan that was slightly off course. | Amber | optional |
+| High | A plan that went badly off course; a sign of lost context ("lost in the middle"). | Red | required |
+| Send to IT | Malicious code, or work that ran without supervision. | Red velvet | required |
+
+Whether an error is a plan or a session error is worked out by the server when it is logged, from the Claude session id alone. Records logged before 0.3.0 have no severity and show as **Unrated**; each can be given a severity once with **Rate…**. *Send to IT* is a label only: nothing is sent anywhere. Records are otherwise never edited.
 
 ## Environment variables
 
@@ -191,6 +211,7 @@ None are required; the defaults work out of the box. Set them only to change the
 | `MY_LAVISH_STATE_DIR` | `~/.my-lavish-axi` | Holds `state.json` and `server.log` |
 | `MY_LAVISH_NO_OPEN` | unset | `1` = never launch a browser (same as `--no-open`) |
 | `MY_LAVISH_IDLE_TIMEOUT_MS` | `1800000` | Server exits after this long with no WebSocket or poll connections; `0` or `off` disables |
+| `MY_LAVISH_ERROR_LOG` | `~/claude-errors/error-log.json` | Where the server writes logged errors |
 
 Example (PowerShell): `$env:MY_LAVISH_PORT = "5000"; see-plan examples/plan.html`
 Example (bash): `MY_LAVISH_PORT=5000 see-plan examples/plan.html`

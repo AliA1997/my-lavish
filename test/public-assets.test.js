@@ -27,14 +27,14 @@ async function fetchAsset(baseUrl, name) {
 
 test("server serves every browser file", async (t) => {
   const { baseUrl } = await setup(t);
-  for (const name of ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css"]) {
+  for (const name of ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css", "errors-client.js", "errors.css"]) {
     await fetchAsset(baseUrl, name);
   }
 });
 
 test("browser scripts parse as classic scripts", async (t) => {
   const { baseUrl } = await setup(t);
-  for (const name of ["sdk.js", "chrome-client.js", "home-client.js"]) {
+  for (const name of ["sdk.js", "chrome-client.js", "home-client.js", "logs-client.js", "errors-client.js"]) {
     const source = await fetchAsset(baseUrl, name);
     assert.doesNotThrow(() => new Function(source), `${name} has a syntax error`);
   }
@@ -154,4 +154,67 @@ test("the repository is MIT licensed with an upstream notice", async () => {
   assert.equal(pkg.license, "MIT");
   assert.ok(pkg.files.includes("LICENSE") && pkg.files.includes("NOTICE") && !pkg.files.includes("test"));
   assert.match(await fs.promises.readFile(new URL("NOTICE", root), "utf8"), /lavish-axi.*Kun Chen/s);
+});
+
+// WCAG relative luminance and contrast ratio, for the severity badge colors.
+function luminance(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+const contrast = (a, b) => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+};
+
+test("severity badges: plan colors, text at 4.5:1 or better in light and dark, in all three stylesheets", async (t) => {
+  const { baseUrl } = await setup(t);
+  const expected = {
+    light: { low: "#E8730C", medium: "#F2B600", high: "#C62828", send_to_it: "#7B1E3A", unrated: "#6B7280" },
+    dark: { low: "#FF9A3D", medium: "#FFC94D", high: "#FF5C5C", send_to_it: "#C2456A", unrated: "#9CA3AF" },
+  };
+  for (const name of ["errors.css", "logs.css", "chrome.css"]) {
+    const css = await fetchAsset(baseUrl, name);
+    const start = css.indexOf("---- severity");
+    assert.ok(start > 0, `${name} has the severity block`);
+    const block = css.slice(start);
+    const darkAt = block.indexOf("@media (prefers-color-scheme: dark)");
+    for (const [mode, part] of [["light", block.slice(0, darkAt)], ["dark", block.slice(darkAt)]]) {
+      for (const [sev, bg] of Object.entries(expected[mode])) {
+        const got = new RegExp(`--sev-${sev}-bg: (#[0-9A-Fa-f]{6})`).exec(part)?.[1];
+        const fg = new RegExp(`--sev-${sev}-fg: (#[0-9A-Fa-f]{6})`).exec(part)?.[1];
+        assert.equal(got?.toUpperCase(), bg, `${name} ${mode} ${sev} background`);
+        assert.ok(fg === "#000000" || fg === "#FFFFFF", `${name} ${mode} ${sev} text is black or white`);
+        assert.ok(contrast(bg, fg) >= 4.5, `${name} ${mode} ${sev}: ${contrast(bg, fg).toFixed(2)}:1`);
+      }
+    }
+  }
+});
+
+test("the /claude dialog and the panel popover offer four severity radios, none checked", async (t) => {
+  const { baseUrl } = await setup(t);
+  const html = await (await fetch(`${baseUrl}/claude`)).text();
+  const fieldset = /<fieldset id="logSeverity"[\s\S]*?<\/fieldset>/.exec(html)[0];
+  assert.equal(fieldset.match(/type="radio"/g).length, 4);
+  assert.ok(!fieldset.includes("checked"), "no severity is picked for the user");
+  assert.ok(fieldset.includes("<legend>Severity</legend>"));
+  for (const v of ["low", "medium", "high", "send_to_it"]) assert.ok(fieldset.includes(`value="${v}"`), v);
+  assert.match(html, /id="logConfirm" type="submit" class="primary" disabled/);
+  const client = await fetchAsset(baseUrl, "logs-client.js");
+  assert.ok(client.includes("required for High and Send to IT") && client.includes("severity: severity"));
+
+  const panel = createChromeHtml({ key: "k", file: "f.html", status: "open", chat: [], revision: 0 }, { baseUrl });
+  const pop = /<div id="logPopover"[\s\S]*?<\/div>\s*<\/div>/.exec(panel)[0];
+  assert.equal(pop.match(/type="radio"/g).length, 4);
+  const chrome = await fetchAsset(baseUrl, "chrome-client.js");
+  assert.ok(chrome.includes("target: { entry: entryRecord(entry), note: note,"), "the agent prompt payload is unchanged (no severity)");
+  assert.ok(chrome.includes("entryRecord(entry, reason, severity)"), "only the error-log payload carries the severity");
+});
+
+test("the errors page script builds the DOM with textContent only", async (t) => {
+  const { baseUrl } = await setup(t);
+  const client = await fetchAsset(baseUrl, "errors-client.js");
+  assert.ok(!client.includes("innerHTML"));
+  for (const route of ["/api/errors/summary", "/api/errors/record", "/api/errors/rate", "/api/plans?limit=50", "/api/claude-sessions?limit=75"]) assert.ok(client.includes(route), route);
+  for (const key of ["ArrowRight", "ArrowLeft", "Home", "End", "encodeURIComponent", "document.hidden"]) assert.ok(client.includes(key), key);
 });

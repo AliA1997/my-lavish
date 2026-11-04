@@ -90,6 +90,11 @@
   var claudeEntries = $("claudeEntries");
   var logPopover = $("logPopover");
   var logNote = $("logNote");
+  var logNoteLabel = $("logNoteLabel");
+  var logSeverityInputs = Array.prototype.slice.call($("logSeverity").querySelectorAll("input[type=radio]"));
+  // A copy of src/severity.js: High and Send to IT need a reason.
+  var SEVERITY_TITLES = { low: "Low", medium: "Medium", high: "High", send_to_it: "Send to IT" };
+  var REASON_REQUIRED = ["high", "send_to_it"];
   var confirmDialog = $("confirmDialog");
   var decisionDialog = $("decisionDialog");
   var feedbackDialog = $("feedbackDialog");
@@ -1166,16 +1171,32 @@
     claudeEntries.appendChild(row);
   }
 
+  function pickedLogSeverity() {
+    for (var i = 0; i < logSeverityInputs.length; i++) if (logSeverityInputs[i].checked) return logSeverityInputs[i].value;
+    return null;
+  }
+
+  /** Log as error and Both need a severity (and a note for High / Send to IT); Send to agent alone doesn't. */
+  function updatePopoverButtons() {
+    var severity = pickedLogSeverity();
+    var required = REASON_REQUIRED.indexOf(severity) !== -1;
+    logNoteLabel.textContent = required ? "Note to agent / reason (required for High and Send to IT)" : "Note to agent / reason (optional)";
+    var canLog = Boolean(severity) && (!required || Boolean(logNote.value.trim()));
+    $("logError").disabled = !canLog;
+    $("logBoth").disabled = ended || !canLog;
+  }
+
   function openPopover(entry, row) {
     popoverEntry = entry;
     popoverRow = row;
     logNote.value = "";
+    logSeverityInputs.forEach(function (input) { input.checked = false; });
     var rect = row.getBoundingClientRect();
     logPopover.style.top = Math.min(window.innerHeight - 220, Math.max(8, rect.bottom + 4)) + "px";
     logPopover.style.right = "12px";
     logPopover.hidden = false;
     $("logSend").disabled = ended;
-    $("logBoth").disabled = ended;
+    updatePopoverButtons();
     logNote.focus();
   }
 
@@ -1186,8 +1207,11 @@
     popoverRow = null;
   }
 
-  /** `reason` rides along only when the entry is logged as an error: the popover note is the reason. */
-  function entryRecord(entry, reason) {
+  /**
+   * `reason` and `severity` ride along only when the entry is logged as an error (the popover note is the reason).
+   * The agent prompt payload calls entryRecord(entry) and stays unchanged.
+   */
+  function entryRecord(entry, reason, severity) {
     var record = {
       claude_session_id: claudeSessionId,
       uuid: typeof entry.uuid === "string" ? entry.uuid : null,
@@ -1198,15 +1222,16 @@
       text: String(entry.text || ""),
     };
     if (reason !== undefined) record.reason = reason || null;
+    if (severity !== undefined) record.severity = severity;
     return record;
   }
 
   /** The server writes the error log itself; the agent is never asked to. */
-  function logAsError(entry, reason) {
+  function logAsError(entry, reason, severity) {
     return fetch("/api/claude-errors", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ entry: entryRecord(entry, reason) }),
+      body: JSON.stringify({ entry: entryRecord(entry, reason, severity) }),
     }).then(function (res) {
       return readJson(res).then(function (body) {
         if (!res.ok) throw new Error(errorMessage(body, res.status));
@@ -1246,17 +1271,23 @@
     var row = popoverRow;
     if (!entry || !row) return;
     var note = logNote.value.trim();
+    var severity = pickedLogSeverity();
+    if (asError && (!severity || (REASON_REQUIRED.indexOf(severity) !== -1 && !note))) {
+      updatePopoverButtons();
+      showHint(severity ? "High and Send to IT need a reason." : "Pick a severity first.", true);
+      return;
+    }
     if (toAgent && row.classList.contains("sent")) {
       showHint("That entry was already sent to the agent.", false);
       hidePopover();
       return;
     }
     hidePopover();
-    var step = asError ? logAsError(entry, note) : Promise.resolve(null); // the popover is the confirmation
+    var step = asError ? logAsError(entry, note, severity) : Promise.resolve(null); // the popover is the confirmation
     step
       .then(function (logged) {
         if (!toAgent) {
-          showHint(logged && logged.duplicate ? "Already in " + ERROR_LOG + "; the first reason was kept." : "Logged to " + ERROR_LOG + ".", false);
+          showHint(logged && logged.duplicate ? "Already in " + ERROR_LOG + "; the first reason and severity were kept." : "Logged to " + ERROR_LOG + " as " + SEVERITY_TITLES[severity] + ".", false);
           return;
         }
         return sendEntryToAgent(entry, row, note, asError).then(function (body) {
@@ -1459,8 +1490,16 @@
   $("logError").addEventListener("click", function () { popoverAction(false, true); });
   $("logBoth").addEventListener("click", function () { popoverAction(true, true); });
   $("logCancel").addEventListener("click", hidePopover);
+  logSeverityInputs.forEach(function (input) { input.addEventListener("change", updatePopoverButtons); });
+  logNote.addEventListener("input", updatePopoverButtons);
   logPopover.addEventListener("keydown", function (event) {
     if (event.key === "Escape") hidePopover();
+    if (/^[1-4]$/.test(event.key) && event.target !== logNote && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      event.preventDefault();
+      logSeverityInputs[Number(event.key) - 1].checked = true;
+      logSeverityInputs[Number(event.key) - 1].focus();
+      updatePopoverButtons();
+    }
   });
   tabChat.addEventListener("click", function () { selectTab(false); });
   tabLog.addEventListener("click", function () { selectTab(true); });

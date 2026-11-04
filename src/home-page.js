@@ -16,7 +16,7 @@ export function createHomeHtml({ baseUrl } = {}) {
     <p class="eyebrow">see-plan</p>
     <h1>Features and review sessions</h1>
   </div>
-  <nav><a href="/claude">Claude logs</a> <button id="newFeature" type="button" class="primary">New feature</button></nav>
+  <nav><a href="/claude">Claude logs</a> <a href="/errors">Error logs</a> <button id="newFeature" type="button" class="primary">New feature</button></nav>
 </header>
 <p id="status" role="status" aria-live="polite"></p>
 <section aria-labelledby="featuresTitle">

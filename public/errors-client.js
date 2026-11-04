@@ -22,7 +22,7 @@
   var statusEl = document.getElementById("status");
   var tabs = TABS.map(function (id) { return document.getElementById("tab-" + id); });
   var state = {}; // tab id -> { loaded, filter, items, next_offset, total, busy }
-  TABS.forEach(function (id) { state[id] = { loaded: false, filter: "all", items: [], next_offset: null, total: 0, busy: false }; });
+  TABS.forEach(function (id) { state[id] = { loaded: false, filter: "all", items: [], next_offset: null, total: 0, busy: false, seq: 0 }; });
   var summary = null;
   var active = null;
   var timer = null;
@@ -218,37 +218,44 @@
 
   // ---- loading ----
 
+  // A fresh load (a filter change, a refresh) always runs and wins over one in flight; only "Load more" waits.
   function load(id, more) {
     var s = state[id];
-    if (s.busy) return;
+    if (more && s.busy) return;
     s.busy = true;
+    var seq = ++s.seq;
+    var stale = function () { return seq !== s.seq; };
     var request;
     if (CONTEXT[id]) {
       var q = "?context=" + encodeURIComponent(CONTEXT[id]) + "&limit=" + PAGE + "&offset=" + (more ? s.next_offset || 0 : 0);
       if (s.filter !== "all") q += "&severity=" + encodeURIComponent(s.filter);
       request = getJson("/api/errors" + q).then(function (body) {
+        if (stale()) return;
         s.items = more ? s.items.concat(body.items || []) : body.items || [];
         s.next_offset = body.next_offset;
         s.total = body.total;
       });
     } else if (id === "plans") {
       request = getJson("/api/plans?limit=50").then(function (body) {
+        if (stale()) return;
         s.items = body.items || [];
       });
     } else {
       request = getJson("/api/claude-sessions?limit=75").then(function (body) {
+        if (stale()) return;
         s.items = body.sessions || [];
         setCount("sessions", s.items.length);
       });
     }
     request
       .then(function () {
+        if (stale()) return;
         s.loaded = true;
         render(id);
         if (statusEl.classList.contains("error")) setStatus("", false);
       })
-      .catch(function (e) { setStatus("Could not load this tab: " + e.message, true); })
-      .then(function () { s.busy = false; });
+      .catch(function (e) { if (!stale()) setStatus("Could not load this tab: " + e.message, true); })
+      .then(function () { if (!stale()) s.busy = false; });
   }
 
   function render(id) {

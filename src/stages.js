@@ -85,6 +85,15 @@ export function isPlanFolderPath(file) {
   return parent === "plans" || parent === "specs";
 }
 
+/**
+ * A session's stage for listing and classification: its label, or for an unlabeled session (one created before
+ * path inference, never resumed since) the stage its path gives. Read-only: nothing is written back.
+ */
+export function effectiveStage(session) {
+  if (isStage(session?.stage)) return session.stage;
+  return inferStageFromPath(session?.source_file ?? session?.file);
+}
+
 /** D8: a file the Plans tab lists — in a plans/ or specs/ folder, or a New-feature `*.plan.md` file. */
 export function isPlanFile(file) {
   return isPlanFolderPath(file) || /\.plan\.md$/i.test(String(file ?? ""));

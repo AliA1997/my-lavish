@@ -231,3 +231,30 @@ test("findLastPromptAt reads backwards past chunk boundaries", async (t) => {
   assert.equal(await findLastPromptAt(file, size), "2026-01-01T00:01:00Z");
   assert.equal(await findLastPromptAt(file, size, { maxScan: 300 * 1024 }), null, "gives up past maxScan");
 });
+
+test("the Claude-session lister caches the stat list and re-reads a head only when its mtime changes", async (t) => {
+  const { createClaudeSessionLister } = await import("../src/claude-log.js");
+  const { claudeDir } = await fixture(t);
+  const dir = path.join(claudeDir, "projects", "C--cache");
+  await fs.promises.mkdir(dir, { recursive: true });
+  const id = "00000000-0000-4000-8000-0000000000c1";
+  const file = path.join(dir, `${id}.jsonl`);
+  await fs.promises.writeFile(file, JSON.stringify({ type: "user", message: { content: "cached title" } }) + "\n");
+  let clock = 1000;
+  const lister = createClaudeSessionLister({ ttlMs: 30000, now: () => clock });
+  const first = await lister.list({ claudeDir, limit: 75 });
+  assert.equal(first.find((s) => s.id === id).title, "cached title");
+  const { scans, heads } = { ...lister.stats };
+  await lister.list({ claudeDir, limit: 75 });
+  assert.deepEqual([lister.stats.scans, lister.stats.heads], [scans, heads], "a second call within the TTL hits both caches");
+  clock += 31000;
+  await lister.list({ claudeDir, limit: 75 });
+  assert.equal(lister.stats.scans, scans + 1, "the stat list is rebuilt after the TTL");
+  assert.equal(lister.stats.heads, heads, "unchanged mtimes reuse the cached heads");
+  assert.equal(await lister.titleOf({ claudeDir, id }), "cached title");
+  const later = new Date(Date.now() + 60000);
+  await fs.promises.utimes(file, later, later);
+  clock += 31000;
+  await lister.list({ claudeDir, limit: 75 });
+  assert.equal(lister.stats.heads, heads + 1, "a changed mtime re-reads that head");
+});

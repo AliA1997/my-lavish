@@ -1,7 +1,14 @@
 import { escapeHtml } from "./markdown.js";
+import { SEVERITIES, SEVERITY_HINTS, SEVERITY_TITLES } from "./severity.js";
+
+/** Four severity radios, none checked: the user has to pick one (D5). Keys 1-4 pick one too. */
+export function severityOptions(name) {
+  return SEVERITIES.map((s, i) => `<label class="severity-option sev-${s}"><input type="radio" name="${name}" value="${s}"><span class="swatch" aria-hidden="true"></span><span class="sev-label">${i + 1}. ${escapeHtml(SEVERITY_TITLES[s])}</span><span class="sev-hint">${escapeHtml(SEVERITY_HINTS[s])}</span></label>`).join("\n      ");
+}
 
 /** The full-page Claude log view: no plan, just the newest (or chosen) Claude session's transcript. */
-export function createLogsHtml({ baseUrl } = {}) {
+export function createLogsHtml({ baseUrl, projectKey = null } = {}) {
+  const errorsHref = projectKey ? `/errors?project=${encodeURIComponent(projectKey)}` : "/errors";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -11,6 +18,7 @@ export function createLogsHtml({ baseUrl } = {}) {
 <link rel="stylesheet" href="/logs.css">
 </head>
 <body data-base-url="${escapeHtml(baseUrl ?? "")}">
+<nav id="pageNav" aria-label="Pages"><a href="/">Dashboard</a> <a href="${escapeHtml(errorsHref)}">Error logs</a></nav>
 <header id="top">
   <div id="identity">
     <p class="eyebrow">Claude session</p>
@@ -30,12 +38,17 @@ export function createLogsHtml({ baseUrl } = {}) {
     <h2 id="logDialogTitle">Log as error</h2>
     <p id="logPreviewMeta" class="preview-meta"></p>
     <blockquote id="logPreview"></blockquote>
-    <label for="logReason">Why is this an error? (optional)</label>
+    <fieldset id="logSeverity" class="severity-picker">
+      <legend>Severity</legend>
+      ${severityOptions("logSeverityChoice")}
+    </fieldset>
+    <p id="logSavedSeverity" class="saved-severity" hidden></p>
+    <label for="logReason" id="logReasonLabel">Why is this an error? (optional)</label>
     <textarea id="logReason" rows="4" maxlength="2000"></textarea>
     <p id="logDialogHint" class="hint">Ctrl+Enter to log &middot; Esc to cancel</p>
     <div class="dialog-actions">
       <button id="logCancel" type="button">Cancel</button>
-      <button id="logConfirm" type="submit" class="primary">Log as error</button>
+      <button id="logConfirm" type="submit" class="primary" disabled>Log as error</button>
     </div>
   </form>
 </dialog>

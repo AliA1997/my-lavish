@@ -784,7 +784,7 @@ async function logPage(t) {
   t.after(() => fs.promises.rm(errorDir, { recursive: true, force: true }));
   const errorLogFile = path.join(errorDir, "claude-errors", "error-log.json");
   const ctx = await setup(t, { claudeDir, errorLogFile });
-  const entry = { claude_session_id: CLAUDE_ID, uuid: "u-9", part: 0, role: "user", kind: "text", at: "2026-10-25T23:32:00.000Z", text: "three" };
+  const entry = { claude_session_id: CLAUDE_ID, uuid: "u-9", part: 0, role: "user", kind: "text", at: "2026-10-25T23:32:00.000Z", text: "three", severity: "low" };
   return { ...ctx, transcript, errorLogFile, entry };
 }
 

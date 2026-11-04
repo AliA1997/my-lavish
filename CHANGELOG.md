@@ -1,5 +1,52 @@
 # Changelog
 
+## [Unreleased] - planned for 3.3.0
+
+The rest of the 2026-11-03 plan (`docs/superpowers/plans/2026-11-03-logs-sessions-plans-fixes.md`, Tasks 2–4): log hand-off, session management and plan management. Its stage inference for plan folders and its Claude-session cache shipped early (0.3.0, and again in 3.2.0).
+
+## [3.2.0] - 2026-11-04
+
+The v0.3.1 release was reverted, and its error-log tabs and severity were planned again (`docs/superpowers/plans/2026-11-04-project-aware-error-tabs.md`) with one new rule: **the view depends on the folder you start it in.** Everything listed under 0.3.0 and 0.3.1 below is back, except for the changes noted here. The version jumps from 0.3.1 straight to 3.2.0; there are no 1.x or 2.x releases.
+
+### Project-aware error logs
+- New command **`see-plan error-logs`** (`--dir`, `--no-open`) opens the error-log view for the current folder. Bare `see-plan` in a terminal also prints it as `error_logs`.
+- **In a project folder** (the nearest folder with `.git`, `docs/superpowers/` or `.superpowers/`; never your home folder), `/errors?project=<key>` shows all four tabs: Session Error Logs, Plan Error Logs, Plans and Sessions.
+- **Anywhere else**, `/errors` shows **only the Sessions tab** (the 75 most recent Claude sessions), with links to projects you opened before. The other tabs aren't rendered.
+- The **Plans** tab now lists the project's **superpowers plans** (`docs/superpowers/plans/`, the newest 50 by their date prefix or creation time) with title, review status (including *Not opened*) and error counts. **Open** starts a review session for a plan straight from the tab. It replaces 0.3.0's list of plan-stage review sessions.
+- New routes: `POST /api/projects` (CLI only; registers a project root), `GET /api/projects`, `GET /api/projects/:project/plans` and `POST /api/projects/:project/plans/open` (same origin; only a file name from the listing). `GET /api/errors/summary` takes `?project=`.
+- Registered projects are kept in `state.json` (at most 50).
+
+### Breaking
+- `GET /api/plans` was removed; use `GET /api/projects/:project/plans`.
+- `/errors` without a registered `?project=` shows only Sessions.
+
+## [0.3.1] - 2026-11-04
+
+First release with the 0.3.0 changes (error severity and the tabbed `/errors` page, listed under 0.3.0 below), plus these fixes.
+
+### Fixes
+- **Plans tab was empty for existing plans.** Review sessions created before 0.3.0 had no stage saved, so plans in a `plans/` or `specs/` folder were missing from the Plans tab and its count until they were reopened, and their errors were filed under Session Error Logs. An unlabeled session now takes its stage from its path when the lists are read. Nothing is rewritten in `state.json`, and a stage you or the agent set still wins.
+- **Severity filter chips on `/errors` could do nothing.** Clicking a chip while the tab was still loading changed the selection but never reloaded the list. A newer load now replaces the one in flight.
+
+## [0.3.0] - 2026-11-04
+
+### Error severity
+- Logging an entry as an error now needs a **severity**: Low, Medium, High or Send to IT, each with a color and a one-line meaning. Keys 1–4 pick one in the `/claude` dialog and the panel popover. High and Send to IT also need a reason; the server answers `VALIDATION_ERROR` without one.
+- Records gain `severity`, plus `context` (`plan` or `session`), `review_key` and `stage`, worked out by the server from the Claude session id when the entry is logged. A duplicate keeps the first severity and returns it.
+- Entries already logged show a severity badge and, in the dialog, their saved severity.
+
+### Error logs page
+- New page `/errors` with four tabs: **Session Error Logs**, **Plan Error Logs**, **Plans** (the latest 50) and **Sessions** (the latest 75 Claude sessions), with counts, severity filter chips, expandable entries and **Load more**.
+- Records from before 0.3.0 show as **Unrated** and can be given a severity once (**Rate…**).
+- New routes: `GET /api/errors`, `GET /api/errors/record`, `GET /api/errors/summary`, `POST /api/errors/rate` and `GET /api/plans`. `GET /api/claude-sessions` takes `limit` (up to 75) and adds the review session, stage and error counts.
+- The dashboard and the Claude log page link to it.
+
+### Also
+- Files in a `plans/` or `specs/` folder get the Plan stage from their path, on create and on resume, without overriding a stage you or the agent set.
+- The Claude session list is cached (30 s for the file list; titles until a transcript changes).
+- The parsed error log is cached until the file changes; the server logs its size at startup.
+- `MY_LAVISH_ERROR_LOG` points the server at another error log file (used by the smoke test).
+
 ## [0.2.1] - 2026-11-03
 
 ### Error log

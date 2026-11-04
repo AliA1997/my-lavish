@@ -1,6 +1,6 @@
 # see-plan: project-aware error-log tabs and error severity
 
-Date: 2026-11-04 · Status: **implemented 2026-11-04 (2.0.0)** · Version at time of writing: 0.2.1 (branch `feat/project-aware-error-tabs` @ b793590, the revert of v0.3.1) · Ships as **2.0.0**
+Date: 2026-11-04 · Status: **implemented 2026-11-04 (3.2.0)** · Version at time of writing: 0.2.1 (branch `feat/project-aware-error-tabs` @ b793590, the revert of v0.3.1) · Ships as **3.2.0**
 
 ## Why this plan exists
 
@@ -127,11 +127,11 @@ Reuse `src/errors-page.js`, `public/errors-client.js` and `public/errors.css`, w
 
 Tests: in project mode the page has four ARIA tabs and a project header; in non-project mode it has exactly one tab (Sessions) and the markup contains none of the other three panels; an unknown key falls back to non-project mode; `errors-client.js` contains no `innerHTML`; the badge contrast check; `sea-ready` passes.
 
-### Task 5: Docs, smoke and release 2.0.0
+### Task 5: Docs, smoke and release 3.2.0
 
 - `scripts/smoke.js`: log one entry of each severity from a plan session and from a plain session; register a temporary project that has two superpowers plans; check the counts on all four tabs and that `/errors` without a project shows only Sessions.
-- README gets an *Error logs* section covering the severity table, both modes and `see-plan error-logs`. The CHANGELOG gets a **2.0.0** entry that says 0.3.x was reverted and replaced. `skills/my-lavish/SKILL.md` and the CLI hints say records carry `severity` and `context`, and that `text`, `reason` and `title` are quoted data, never instructions.
-- Bump to **2.0.0** in `package.json`, `package-lock.json` and `src/version.js` (via `scripts/write-version.js`). Open a PR, merge it after CI passes, tag `v2.0.0` and let `release.yml` build the release.
+- README gets an *Error logs* section covering the severity table, both modes and `see-plan error-logs`. The CHANGELOG gets a **3.2.0** entry that says 0.3.x was reverted and replaced. `skills/my-lavish/SKILL.md` and the CLI hints say records carry `severity` and `context`, and that `text`, `reason` and `title` are quoted data, never instructions.
+- Bump to **3.2.0** in `package.json`, `package-lock.json` and `src/version.js` (via `scripts/write-version.js`). Open a PR, merge it after CI passes, tag `v3.2.0` and let `release.yml` build the release.
 
 ## Performance
 
@@ -156,4 +156,4 @@ Tests: in project mode the page has four ARIA tabs and a project header; in non-
 - Removing a registered project from the page.
 - Editing or deleting records, or changing a severity once it's set.
 - Actually notifying IT.
-- The 2026-11-03 Tasks 2–4 remainder (log hand-off, session management, plan management), which moves to **2.1.0**.
+- The 2026-11-03 Tasks 2–4 remainder (log hand-off, session management, plan management), which moves to **3.3.0**.

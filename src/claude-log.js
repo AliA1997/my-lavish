@@ -210,8 +210,8 @@ async function readHead(file) {
   return { cwd, title: title.length > MAX_TITLE ? `${title.slice(0, MAX_TITLE)}…` : title };
 }
 
-/** The `limit` most recently written <claudeDir>/projects/*\/<uuid>.jsonl transcripts, newest first. */
-export async function listClaudeSessions({ claudeDir, limit = 20 }) {
+/** Every <claudeDir>/projects/*\/<uuid>.jsonl transcript as { id, project, file, mtimeMs }, newest first. */
+async function scanTranscripts(claudeDir) {
   const projects = path.join(claudeDir, "projects");
   let dirs;
   try {
@@ -231,10 +231,62 @@ export async function listClaudeSessions({ claudeDir, limit = 20 }) {
     }));
   }));
   found.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return Promise.all(found.slice(0, limit).map(async ({ id, project, file, mtimeMs }) => ({
-    id,
-    project,
-    modified_at: new Date(mtimeMs).toISOString(),
-    ...(await readHead(file).catch(() => ({ cwd: null, title: "" }))),
-  })));
+  return found;
+}
+
+function toSession({ id, project, mtimeMs }, head) {
+  return { id, project, modified_at: new Date(mtimeMs).toISOString(), ...head };
+}
+
+/** The `limit` most recently written <claudeDir>/projects/*\/<uuid>.jsonl transcripts, newest first. */
+export async function listClaudeSessions({ claudeDir, limit = 20 }) {
+  const found = await scanTranscripts(claudeDir);
+  return Promise.all(found.slice(0, limit).map(async (t) => toSession(t, await readHead(t.file).catch(() => ({ cwd: null, title: "" })))));
+}
+
+/**
+ * A cached listClaudeSessions: the sorted stat list is kept for `ttlMs`, and each transcript head
+ * (cwd and title) is kept until its mtime changes. `stats` counts disk scans and head reads, for tests.
+ */
+export function createClaudeSessionLister({ ttlMs = 30000, now = () => Date.now() } = {}) {
+  const scans = new Map(); // claudeDir -> { at, found: Promise }
+  const heads = new Map(); // file -> { mtimeMs, head: Promise }
+  const stats = { scans: 0, heads: 0 };
+
+  function scan(claudeDir) {
+    const hit = scans.get(claudeDir);
+    if (hit && now() - hit.at < ttlMs) return hit.found;
+    stats.scans++;
+    const found = scanTranscripts(claudeDir);
+    scans.set(claudeDir, { at: now(), found });
+    found.catch(() => scans.delete(claudeDir));
+    return found;
+  }
+
+  function head(t) {
+    const hit = heads.get(t.file);
+    if (hit && hit.mtimeMs === t.mtimeMs) return hit.head;
+    stats.heads++;
+    const h = readHead(t.file).catch(() => ({ cwd: null, title: "" }));
+    heads.set(t.file, { mtimeMs: t.mtimeMs, head: h });
+    return h;
+  }
+
+  return {
+    stats,
+    async list({ claudeDir, limit = 20 }) {
+      const found = await scan(claudeDir);
+      if (heads.size > 2000) heads.clear(); // bound memory on very long runs
+      return Promise.all(found.slice(0, limit).map(async (t) => toSession(t, await head(t))));
+    },
+    /** The title of one Claude session (from the cached scan and head caches), or null when no transcript is found. */
+    async titleOf({ claudeDir, id }) {
+      const found = await scan(claudeDir);
+      const t = found.find((x) => x.id === id);
+      return t ? (await head(t)).title || "" : null;
+    },
+    clear() {
+      scans.clear();
+    },
+  };
 }

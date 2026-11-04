@@ -74,7 +74,20 @@ export function inferStageFromPath(file) {
   if (/verif/.test(name)) return "verification";
   if (/progress|implementation/.test(name)) return "implementation";
   if (/(^|[-_.])plan([-_.]|$)/.test(name)) return "plan";
+  if (isPlanFolderPath(file)) return "plan";
   return null;
+}
+
+/** True when a file's parent folder is named `plans` or `specs` (docs/superpowers/plans/x.md and the like). */
+export function isPlanFolderPath(file) {
+  const parts = String(file ?? "").split(/[\\/]+/).filter(Boolean);
+  const parent = parts.length > 1 ? parts[parts.length - 2].toLowerCase() : "";
+  return parent === "plans" || parent === "specs";
+}
+
+/** D8: a file the Plans tab lists — in a plans/ or specs/ folder, or a New-feature `*.plan.md` file. */
+export function isPlanFile(file) {
+  return isPlanFolderPath(file) || /\.plan\.md$/i.test(String(file ?? ""));
 }
 
 /** Decision 4: flag → human → text → path → workflow. Returns { stage, source } or { stage: null, source: null }. */

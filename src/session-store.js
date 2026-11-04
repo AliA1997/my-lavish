@@ -47,6 +47,7 @@ export class SessionStore {
   #file;
   #dir;
   #mutex = new Mutex();
+  #writes = 0;
 
   constructor(stateDir) {
     this.#dir = stateDir;
@@ -66,6 +67,12 @@ export class SessionStore {
     const tmp = `${this.#file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
     await fs.promises.writeFile(tmp, JSON.stringify(state, null, 2));
     await fs.promises.rename(tmp, this.#file);
+    this.#writes++;
+  }
+
+  /** Counts this store's writes to state.json: a cache key that, unlike mtime, never repeats across quick writes. */
+  get writeCount() {
+    return this.#writes;
   }
 
   // Runs fn(state) under the mutex; fn returns [result, dirty].
@@ -117,6 +124,11 @@ export class SessionStore {
       existing.url = `${baseUrl}/session/${key}`;
       if (source_file !== undefined) existing.source_file = source_file;
       if (isStage(stage)) Object.assign(existing, { stage, stage_source: "flag" });
+      else {
+        // Inference runs on resume too, but never over a stronger label (flag, human, text).
+        const inferred = inferStageFromPath(existing.source_file ?? existing.file);
+        if (inferred && canRelabel(existing.stage_source, "path")) Object.assign(existing, { stage: inferred, stage_source: "path" });
+      }
       if (workflow_id) existing.workflow_id = workflow_id;
       delete existing.archived;
       if (existing.status === "ended") reopen_(existing);

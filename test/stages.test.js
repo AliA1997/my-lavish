@@ -97,3 +97,13 @@ test("files in a plans/ or specs/ folder, and *.plan.md files, are plans (D8)", 
   assert.equal(isPlanFile("/x/feature-plan.html"), false, "a plan-stage file outside the plan folders is not on the Plans tab");
   assert.equal(isPlanFile("/x/docs/superpowers/plans/a.md"), true);
 });
+
+test("effectiveStage: the label wins; an unlabeled session falls back to its path", async () => {
+  const { effectiveStage } = await import("../src/stages.js");
+  assert.equal(effectiveStage({ stage: "verification", file: "/r/plans/x.html" }), "verification");
+  assert.equal(effectiveStage({ file: "/r/plans/x.html" }), "plan");
+  assert.equal(effectiveStage({ file: "/r/x.html", source_file: "/r/specs/x.md" }), "plan");
+  assert.equal(effectiveStage({ file: "/r/notes/x.html" }), null);
+  assert.equal(effectiveStage({ stage: "__proto__", file: "/r/notes/x.html" }), null);
+  assert.equal(effectiveStage(null), null);
+});

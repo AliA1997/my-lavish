@@ -16,7 +16,7 @@ import { isSeverity, needsReason, SEVERITIES } from "./severity.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
 import { ensurePlanHtml, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
-import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, inferStageFromText, isPlanFile, isStage, nextStage, stageInstructions } from "./stages.js";
+import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, effectiveStage, inferStageFromText, isPlanFile, isStage, nextStage, stageInstructions } from "./stages.js";
 import { listRevisions, readRevision, saveRevision } from "./revisions.js";
 import { appendFeedback } from "./feedback-log.js";
 import {
@@ -263,7 +263,8 @@ export function createServer({
         const prev = newest.get(id);
         if (prev && String(prev.updated_at ?? "") >= String(s.updated_at ?? "")) continue;
         newest.set(id, s);
-        byClaude.set(id, { context: s.stage === "plan" ? "plan" : "session", review_key: s.key, stage: s.stage ?? null });
+        const stage = effectiveStage(s);
+        byClaude.set(id, { context: stage === "plan" ? "plan" : "session", review_key: s.key, stage });
       }
       return { byClaude, sessions, byKey: new Map(sessions.map((s) => [s.key, s])) };
     });
@@ -558,7 +559,7 @@ export function createServer({
       } catch (e) {
         return sendErrorLogError(res, e);
       }
-      const plans = lookup.sessions.filter((s) => s.stage === "plan" && isPlanFile(s.source_file ?? s.file)).length;
+      const plans = lookup.sessions.filter((s) => effectiveStage(s) === "plan" && isPlanFile(s.source_file ?? s.file)).length;
       res.json({ counts: summary.counts, plans: Math.min(plans, 50), error_log: errorLogFile });
     } catch (e) {
       next(e);
@@ -603,7 +604,7 @@ export function createServer({
       const summary = await errorSummary(lookup);
       const names = new Map((await listWorkflows(store)).map((w) => [w.id, w.name]));
       const plans = lookup.sessions
-        .filter((s) => s.stage === "plan" && isPlanFile(s.source_file ?? s.file))
+        .filter((s) => effectiveStage(s) === "plan" && isPlanFile(s.source_file ?? s.file))
         .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
       const items = plans.slice(0, limit).map((s) => {
         const sum = sessionSummary(s);

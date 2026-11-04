@@ -4,6 +4,14 @@
 
 The rest of the 2026-11-03 plan (`docs/superpowers/plans/2026-11-03-logs-sessions-plans-fixes.md`, Tasks 2–4): log hand-off, session management and plan management. Its stage inference for plan folders and its Claude-session cache shipped early, in 0.3.0.
 
+## [0.3.1] - 2026-11-04
+
+First release with the 0.3.0 changes (error severity and the tabbed `/errors` page, listed under 0.3.0 below), plus these fixes.
+
+### Fixes
+- **Plans tab was empty for existing plans.** Review sessions created before 0.3.0 had no stage saved, so plans in a `plans/` or `specs/` folder were missing from the Plans tab and its count until they were reopened, and their errors were filed under Session Error Logs. An unlabeled session now takes its stage from its path when the lists are read. Nothing is rewritten in `state.json`, and a stage you or the agent set still wins.
+- **Severity filter chips on `/errors` could do nothing.** Clicking a chip while the tab was still loading changed the selection but never reloaded the list. A newer load now replaces the one in flight.
+
 ## [0.3.0] - 2026-11-04
 
 ### Error severity

@@ -332,3 +332,28 @@ test("timing budgets: /api/errors warm under 50ms with 2,000 records; sessions w
   assert.equal(page.body.items.length, 50);
   assert.ok(errorsWarm < 50, `/api/errors warm ${errorsWarm}ms`);
 });
+
+test("an unlabeled session from before 0.3.0 still counts as a plan by its path, without being rewritten", async (t) => {
+  const { open, get, store, log, entry } = await world(t);
+  const planKey = await open("docs/superpowers/plans/old.html", A);
+  const otherKey = await open("notes/old.html", B);
+  // Sessions created before path inference have no stage until they are resumed.
+  await store.transact((state) => {
+    for (const s of Object.values(state.sessions)) {
+      delete s.stage;
+      delete s.stage_source;
+    }
+    return [null, true];
+  });
+  const plans = await get("/api/plans");
+  assert.deepEqual(plans.body.items.map((p) => p.key), [planKey]);
+  assert.equal((await get("/api/errors/summary")).body.plans, 1);
+  assert.equal((await log(entry(A))).status, 200);
+  assert.equal((await log(entry(B))).status, 200);
+  assert.deepEqual((await get("/api/errors?context=plan")).body.items.map((i) => [i.review_key, i.stage]), [[planKey, "plan"]]);
+  assert.deepEqual((await get("/api/errors?context=session")).body.items.map((i) => i.review_key), [otherKey]);
+  const sessions = (await get("/api/claude-sessions")).body.sessions;
+  assert.equal(sessions.find((s) => s.id === A).stage, "plan");
+  assert.equal(sessions.find((s) => s.id === B).stage, null);
+  assert.equal((await store.getSession(planKey)).stage, undefined); // read-only fallback
+});

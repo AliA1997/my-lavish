@@ -10,13 +10,11 @@ import { assertHtmlFile, canonicalFile, resolveArtifactAsset } from "./artifact-
 import { injectSdk } from "./html-transform.js";
 import { createChromeHtml } from "./chrome-page.js";
 import { createLogsHtml } from "./logs-page.js";
-import { appendErrorLog, ErrorLogError, errorLogSize, getErrorRecord, listErrorRecords, rateErrorRecord, reportedRecords, summarizeErrorRecords } from "./error-log.js";
-import { createErrorsHtml } from "./errors-page.js";
-import { isSeverity, needsReason, SEVERITIES } from "./severity.js";
+import { appendErrorLog, ErrorLogError, reportedRecords } from "./error-log.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
 import { ensurePlanHtml, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
-import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, effectiveStage, inferStageFromText, isPlanFile, isStage, nextStage, stageInstructions } from "./stages.js";
+import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, inferStageFromText, isStage, nextStage, stageInstructions } from "./stages.js";
 import { listRevisions, readRevision, saveRevision } from "./revisions.js";
 import { appendFeedback } from "./feedback-log.js";
 import {
@@ -25,7 +23,7 @@ import {
 } from "./workflow-store.js";
 import { createHomeHtml } from "./home-page.js";
 import { CONTENT_TYPES, PUBLIC_ASSETS, readAsset } from "./assets.js";
-import { createClaudeSessionLister, findLastPromptAt, findTranscript, readTranscript } from "./claude-log.js";
+import { findLastPromptAt, findTranscript, listClaudeSessions, readTranscript } from "./claude-log.js";
 import { buildPrompt, claudeStatus as realClaudeStatus, findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
 
 export { PUBLIC_ASSETS };
@@ -45,32 +43,6 @@ const SESSION_KEY = /^[0-9a-f]{16}$/; // sessionKey(): the first 16 hex digits o
 const PAGE_LOG_BYTES = 1024 * 1024; // the log page's first window; it doubles up to PAGE_MAX_BYTES...
 const PAGE_MAX_BYTES = 16 * 1024 * 1024;
 const PAGE_MIN_ENTRIES = 200; // ...until it holds this many entries (screenshots make some lines huge)
-const ERROR_CONTEXTS = ["session", "plan"];
-const SEVERITY_FILTERS = [...SEVERITIES, "unrated"];
-const ERROR_PREVIEW_CHARS = 500;
-const ERROR_LOG_STATUS = { MISSING: 404, ALREADY_RATED: 409, VALIDATION_ERROR: 400, ERROR_LOG_UNREADABLE: 409 };
-
-/** limit/offset: rounded down, clamped to [min, max]; the default when missing or not a number. */
-function intParam(raw, fallback, min, max) {
-  if (typeof raw !== "string" || raw === "") return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.floor(n))) : fallback;
-}
-
-/** Validates an optional enum query value: undefined when absent, null when invalid. */
-function enumParam(raw, allowed) {
-  if (raw === undefined || raw === "") return undefined;
-  return typeof raw === "string" && allowed.includes(raw) ? raw : null;
-}
-
-/** Plans tab status (archived wins). */
-export function planStatus(s) {
-  if (s.archived) return "Archived";
-  if (s.status === "open") return "Open";
-  if (s.status === "feedback") return "Needs changes";
-  if (s.status === "ended") return s.ended_by === "approved" ? "Approved" : "Ended";
-  return "Open";
-}
 
 function hostnameOf(hostHeader) {
   if (!hostHeader) return "";
@@ -134,9 +106,7 @@ export function createServer({
   agentPollMs = AGENT_POLL_MS,
   presenceGraceMs = PRESENCE_GRACE_MS,
   connectCooldownMs = CONNECT_COOLDOWN_MS,
-  claudeSessionTtlMs = 30000,
 }) {
-  const claudeSessions = createClaudeSessionLister({ ttlMs: claudeSessionTtlMs });
   const app = express();
   const events = new EventEmitter();
   const wss = new WebSocketServer({ noServer: true });
@@ -243,50 +213,6 @@ export function createServer({
       updated_at: s.updated_at,
       agent: live ? (agents.get(s.key)?.agent ?? "agent") : agents.get(s.key)?.working ? "working" : null,
     };
-  }
-
-  // D3: which review session (if any) a Claude session belongs to. Built in one store transaction and
-  // cached by state.json's mtime and size, plus the store's write count (two quick writes can share an
-  // mtime on Windows). The most recently updated review session wins a shared id.
-  let lookupCache = null; // { stamp, value: Promise<{ byClaude, sessions, byKey }> }
-  const stateFile = path.join(stateDir ?? os.tmpdir(), "state.json");
-  async function classificationLookup() {
-    const st = await fs.promises.stat(stateFile).catch(() => null);
-    const stamp = `${store.writeCount ?? ""}:${st ? `${st.mtimeMs}:${st.size}` : "none"}`;
-    if (lookupCache?.stamp === stamp) return lookupCache.value;
-    const value = store.listSessions({ includeArchived: true }).then((sessions) => {
-      const byClaude = new Map();
-      const newest = new Map();
-      for (const s of sessions) {
-        const id = s.claude_session_id;
-        if (!isClaudeSessionId(id)) continue;
-        const prev = newest.get(id);
-        if (prev && String(prev.updated_at ?? "") >= String(s.updated_at ?? "")) continue;
-        newest.set(id, s);
-        const stage = effectiveStage(s);
-        byClaude.set(id, { context: stage === "plan" ? "plan" : "session", review_key: s.key, stage });
-      }
-      return { byClaude, sessions, byKey: new Map(sessions.map((s) => [s.key, s])) };
-    });
-    lookupCache = { stamp, value };
-    value.catch(() => {
-      if (lookupCache?.value === value) lookupCache = null;
-    });
-    return value;
-  }
-
-  async function errorSummary(lookup) {
-    try {
-      return await summarizeErrorRecords(errorLogFile, lookup.byClaude);
-    } catch (e) {
-      if (!(e instanceof ErrorLogError)) throw e;
-      return { counts: null, bySession: new Map(), byReview: new Map(), unreadable: e.message };
-    }
-  }
-
-  function sendErrorLogError(res, e) {
-    if (!(e instanceof ErrorLogError)) throw e;
-    res.status(ERROR_LOG_STATUS[e.code] ?? 409).json(errorBody(e.code, e.message));
   }
 
   async function homeSnapshot() {
@@ -449,180 +375,6 @@ export function createServer({
       await watchSession(session);
       notifyHome();
       res.json({ status, key: session.key, url: session.url, stage: session.stage ?? null, stage_source: session.stage_source ?? null });
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  // ---- the /errors page: error records, plans, Claude sessions (registered before /api/:key/*) ----
-
-  function refusedCrossSite(req, res) {
-    if (!isCrossSite(req)) return false;
-    res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
-    return true;
-  }
-
-  /** { claude_session_id, uuid, part } from a query or body, or null when malformed. */
-  function recordRef(src) {
-    const id = src?.claude_session_id;
-    const uuid = src?.uuid;
-    const part = typeof src?.part === "string" && /^\d{1,3}$/.test(src.part) ? Number(src.part) : src?.part;
-    if (!isClaudeSessionId(id) || !isText(uuid) || uuid.length > 100 || !Number.isInteger(part) || part < 0 || part >= 1000) return null;
-    return { claude_session_id: id, uuid, part };
-  }
-
-  async function titlesFor(ids) {
-    const titles = new Map();
-    await Promise.all([...new Set(ids)].map(async (id) => {
-      titles.set(id, await claudeSessions.titleOf({ claudeDir, id }).catch(() => null));
-    }));
-    return titles;
-  }
-
-  function errorItem(r, lookup, titles, { full = false } = {}) {
-    const text = String(r.text ?? "");
-    const truncated = !full && text.length > ERROR_PREVIEW_CHARS;
-    const review = r.review_key ? lookup.byKey.get(r.review_key) : null;
-    return {
-      claude_session_id: r.claude_session_id,
-      claude_title: titles.get(r.claude_session_id) ?? null,
-      uuid: r.uuid,
-      part: Number(r.part) || 0,
-      context: r.context,
-      review_key: r.review_key ?? null,
-      file: review ? (review.source_file ?? review.file) : null,
-      stage: r.stage ?? null,
-      role: r.role ?? null,
-      kind: r.kind ?? null,
-      at: r.at ?? null,
-      text: truncated ? text.slice(0, ERROR_PREVIEW_CHARS) : text,
-      truncated,
-      reason: r.reason,
-      severity: r.severity,
-      reported_at: r.reported_at ?? null,
-      ...(r.rated_at ? { rated_at: r.rated_at } : {}),
-    };
-  }
-
-  app.get("/api/errors", async (req, res, next) => {
-    try {
-      if (refusedCrossSite(req, res)) return;
-      const context = enumParam(req.query.context, ERROR_CONTEXTS);
-      const severity = enumParam(req.query.severity, SEVERITY_FILTERS);
-      if (context === null) return res.status(400).json(errorBody("VALIDATION_ERROR", `context must be one of ${ERROR_CONTEXTS.join(", ")}`));
-      if (severity === null) return res.status(400).json(errorBody("VALIDATION_ERROR", `severity must be one of ${SEVERITY_FILTERS.join(", ")}`));
-      const limit = intParam(req.query.limit, 50, 1, 200);
-      const offset = intParam(req.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-      touchIdle();
-      const lookup = await classificationLookup();
-      let page;
-      try {
-        page = await listErrorRecords(errorLogFile, { context, severity, limit, offset }, lookup.byClaude);
-      } catch (e) {
-        return sendErrorLogError(res, e);
-      }
-      const titles = await titlesFor(page.items.map((r) => r.claude_session_id));
-      res.json({ items: page.items.map((r) => errorItem(r, lookup, titles)), total: page.total, next_offset: page.next_offset });
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  app.get("/api/errors/record", async (req, res, next) => {
-    try {
-      if (refusedCrossSite(req, res)) return;
-      const ref = recordRef(req.query);
-      if (!ref) return res.status(400).json(errorBody("VALIDATION_ERROR", "claude_session_id, uuid and part are required"));
-      const lookup = await classificationLookup();
-      let record;
-      try {
-        record = await getErrorRecord(errorLogFile, ref, lookup.byClaude);
-      } catch (e) {
-        return sendErrorLogError(res, e);
-      }
-      if (!record) return res.status(404).json(errorBody("MISSING", "No such error record"));
-      const titles = await titlesFor([record.claude_session_id]);
-      res.json({ record: errorItem(record, lookup, titles, { full: true }) });
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  app.get("/api/errors/summary", async (req, res, next) => {
-    try {
-      if (refusedCrossSite(req, res)) return;
-      touchIdle();
-      const lookup = await classificationLookup();
-      let summary;
-      try {
-        summary = await summarizeErrorRecords(errorLogFile, lookup.byClaude);
-      } catch (e) {
-        return sendErrorLogError(res, e);
-      }
-      const plans = lookup.sessions.filter((s) => effectiveStage(s) === "plan" && isPlanFile(s.source_file ?? s.file)).length;
-      res.json({ counts: summary.counts, plans: Math.min(plans, 50), error_log: errorLogFile });
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  app.post("/api/errors/rate", async (req, res, next) => {
-    try {
-      if (!requireSameOrigin(req)) {
-        return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Ratings must come from the error log page"));
-      }
-      const body = req.body ?? {};
-      const ref = recordRef(body);
-      if (!ref) return res.status(400).json(errorBody("VALIDATION_ERROR", "claude_session_id, uuid and part are required"));
-      if (!isSeverity(body.severity)) {
-        return res.status(400).json(errorBody("VALIDATION_ERROR", `severity must be one of ${SEVERITIES.join(", ")}`));
-      }
-      if (body.reason !== undefined && body.reason !== null && typeof body.reason !== "string") {
-        return res.status(400).json(errorBody("VALIDATION_ERROR", "reason must be a string"));
-      }
-      const reason = typeof body.reason === "string" ? body.reason.trim() : "";
-      if (reason.length > MAX_REASON) {
-        return res.status(400).json(errorBody("VALIDATION_ERROR", `reason must be at most ${MAX_REASON} characters`));
-      }
-      let rated;
-      try {
-        rated = await rateErrorRecord(errorLogFile, ref, body.severity, reason);
-      } catch (e) {
-        return sendErrorLogError(res, e);
-      }
-      res.json({ ok: true, ...rated });
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  app.get("/api/plans", async (req, res, next) => {
-    try {
-      if (refusedCrossSite(req, res)) return;
-      const limit = intParam(req.query.limit, 50, 1, 50);
-      const lookup = await classificationLookup();
-      const summary = await errorSummary(lookup);
-      const names = new Map((await listWorkflows(store)).map((w) => [w.id, w.name]));
-      const plans = lookup.sessions
-        .filter((s) => effectiveStage(s) === "plan" && isPlanFile(s.source_file ?? s.file))
-        .sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
-      const items = plans.slice(0, limit).map((s) => {
-        const sum = sessionSummary(s);
-        const errors = summary.byReview.get(s.key);
-        return {
-          key: sum.key,
-          file: sum.file,
-          feature: (s.workflow_id && names.get(s.workflow_id)) || null,
-          status: planStatus(s),
-          archived: Boolean(s.archived),
-          created_at: s.created_at ?? null,
-          updated_at: sum.updated_at,
-          error_count: errors?.count ?? 0,
-          worst_severity: errors?.worst ?? null,
-          url: `/session/${encodeURIComponent(s.key)}`,
-        };
-      });
-      res.json({ items, total: items.length, next_offset: null });
     } catch (e) {
       next(e);
     }
@@ -1258,24 +1010,7 @@ export function createServer({
       if (isCrossSite(req)) {
         return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
       }
-      const limit = intParam(req.query.limit, 20, 1, 75);
-      const [sessions, lookup] = await Promise.all([claudeSessions.list({ claudeDir, limit }), classificationLookup()]);
-      const summary = await errorSummary(lookup);
-      res.json({
-        sessions: sessions.map((s) => {
-          const review = lookup.byClaude.get(s.id);
-          const errors = summary.bySession.get(s.id);
-          return {
-            ...s,
-            review_key: review?.review_key ?? null,
-            stage: review?.stage ?? null,
-            context: review?.context ?? "session",
-            review_url: review ? `/session/${encodeURIComponent(review.review_key)}` : null,
-            error_count: errors?.count ?? 0,
-            worst_severity: errors?.worst ?? null,
-          };
-        }),
-      });
+      res.json({ sessions: await listClaudeSessions({ claudeDir }) });
     } catch (e) {
       next(e);
     }
@@ -1317,7 +1052,6 @@ export function createServer({
         const saved = await reportedRecords(errorLogFile, id); // and the page marks entries already logged
         body.reported = saved.refs;
         body.reasons = saved.reasons;
-        body.severities = saved.severities;
       }
       res.json(body);
     } catch (e) {
@@ -1349,14 +1083,6 @@ export function createServer({
       if (reason.length > MAX_REASON) {
         return res.status(400).json(errorBody("VALIDATION_ERROR", `reason must be at most ${MAX_REASON} characters`));
       }
-      if (!isSeverity(e.severity)) {
-        return res.status(400).json(errorBody("VALIDATION_ERROR", `severity must be one of ${SEVERITIES.join(", ")}`));
-      }
-      if (needsReason(e.severity) && !reason) {
-        return res.status(400).json(errorBody("VALIDATION_ERROR", "High and Send to IT need a reason"));
-      }
-      // D3: context, review key and stage come from the Claude session id alone, never from the client.
-      const cls = (await classificationLookup()).byClaude.get(e.claude_session_id) ?? { context: "session", review_key: null, stage: null };
       const record = {
         claude_session_id: e.claude_session_id,
         uuid: e.uuid,
@@ -1366,10 +1092,6 @@ export function createServer({
         at: e.at,
         text: e.text,
         reason: reason || null,
-        severity: e.severity,
-        context: cls.context,
-        review_key: cls.review_key,
-        stage: cls.stage,
         reported_at: new Date().toISOString(),
       };
       let result;
@@ -1384,7 +1106,6 @@ export function createServer({
         status: result.duplicate ? "already_logged" : "logged",
         duplicate: result.duplicate,
         reason: result.reason, // on a duplicate, the reason saved the first time
-        severity: result.severity, // ...and the severity saved the first time
         error_log: errorLogFile,
       });
     } catch (e) {
@@ -1602,12 +1323,6 @@ export function createServer({
     res.type("html").send(createLogsHtml({ baseUrl }));
   });
 
-  app.get("/errors", (req, res) => {
-    res.set("X-Frame-Options", "DENY");
-    res.set("Content-Security-Policy", "frame-ancestors 'none'");
-    res.type("html").send(createErrorsHtml({ baseUrl }));
-  });
-
   app.get("/artifact/:key/index.html", async (req, res, next) => {
     try {
       const session = await store.getSession(req.params.key);
@@ -1761,8 +1476,6 @@ export function createServer({
         pingTimer = setInterval(pingAll, PING_INTERVAL_MS);
         pingTimer.unref();
         updateIdle();
-        // The log is one JSON array rewritten on each write: past ~1MB it should move to JSONL.
-        track(errorLogSize(errorLogFile).then((size) => log(`error log ${errorLogFile}: ${size} bytes${size > 1024 * 1024 ? " (over 1MB: consider JSONL)" : ""}`), () => {}));
         resolve({ port: actual, baseUrl });
       });
     });

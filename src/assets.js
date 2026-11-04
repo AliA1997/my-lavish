@@ -4,7 +4,7 @@ import * as nodeSea from "node:sea";
 import { fileURLToPath } from "node:url";
 
 /** The browser files the server serves. In a single-executable build they are SEA assets with these names. */
-export const PUBLIC_ASSETS = ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css", "errors-client.js", "errors.css"];
+export const PUBLIC_ASSETS = ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css"];
 
 export const CONTENT_TYPES = { ".js": "application/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
 

@@ -191,30 +191,3 @@ test("claude-log prompts get their own anchor and keep the pending snapshot", as
   assert.equal(r.prompts.length, 2);
   assert.equal(r.dom_snapshot, "<page>");
 });
-
-test("plan-folder files get stage plan on create and on resume, never over a human label", async (t) => {
-  const s = new SessionStore(await mk(t));
-  const plan = path.join(os.tmpdir(), "repo", "docs", "superpowers", "plans", "2026-11-04-x.html");
-  const md = path.join(os.tmpdir(), "repo", "docs", "superpowers", "plans", "2026-11-04-x.md");
-  const created = await s.upsertSession(plan, B, { source_file: md });
-  assert.deepEqual([created.session.stage, created.session.stage_source], ["plan", "path"]);
-
-  // A session saved before 0.3.0 (no stage) is labelled on resume.
-  const other = path.join(os.tmpdir(), "repo", "docs", "superpowers", "specs", "y.html");
-  const first = await s.upsertSession(other, B);
-  assert.equal(first.session.stage, "plan");
-  await s.setStage(first.session.key, null, "human");
-  await s.setStage(first.session.key, "implementation", "human");
-  const resumed = await s.upsertSession(other, B);
-  assert.deepEqual([resumed.session.stage, resumed.session.stage_source], ["implementation", "human"], "a human label is kept on resume");
-
-  const third = path.join(os.tmpdir(), "repo", "docs", "superpowers", "plans", "z.html");
-  const { session } = await s.upsertSession(third, B);
-  await s.transact((state) => {
-    delete state.sessions[session.key].stage;
-    delete state.sessions[session.key].stage_source;
-    return [null, true];
-  });
-  const again = await s.upsertSession(third, B);
-  assert.deepEqual([again.session.stage, again.session.stage_source], ["plan", "path"], "inference runs on resume");
-});

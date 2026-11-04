@@ -85,25 +85,3 @@ test("stage text names the files and forbids starting the next stage", () => {
   assert.match(stageStep("verification"), /do not fix code/);
   assert.equal(stageStep(null), "");
 });
-
-test("files in a plans/ or specs/ folder, and *.plan.md files, are plans (D8)", async () => {
-  const { isPlanFile, isPlanFolderPath } = await import("../src/stages.js");
-  assert.equal(inferStageFromPath(["C:", "repo", "docs", "superpowers", "plans", "2026-11-04-x.md"].join(String.fromCharCode(92))), "plan");
-  assert.equal(inferStageFromPath("/repo/docs/superpowers/specs/design.md"), "plan");
-  assert.equal(inferStageFromPath("/repo/plans/auth-interrogation.md"), "interrogation", "a name rule still wins");
-  assert.equal(inferStageFromPath("/repo/planning/notes.md"), null);
-  assert.equal(isPlanFolderPath("/repo/Plans/x.md"), true);
-  assert.equal(isPlanFile("/x/feature.plan.md"), true);
-  assert.equal(isPlanFile("/x/feature-plan.html"), false, "a plan-stage file outside the plan folders is not on the Plans tab");
-  assert.equal(isPlanFile("/x/docs/superpowers/plans/a.md"), true);
-});
-
-test("effectiveStage: the label wins; an unlabeled session falls back to its path", async () => {
-  const { effectiveStage } = await import("../src/stages.js");
-  assert.equal(effectiveStage({ stage: "verification", file: "/r/plans/x.html" }), "verification");
-  assert.equal(effectiveStage({ file: "/r/plans/x.html" }), "plan");
-  assert.equal(effectiveStage({ file: "/r/x.html", source_file: "/r/specs/x.md" }), "plan");
-  assert.equal(effectiveStage({ file: "/r/notes/x.html" }), null);
-  assert.equal(effectiveStage({ stage: "__proto__", file: "/r/notes/x.html" }), null);
-  assert.equal(effectiveStage(null), null);
-});

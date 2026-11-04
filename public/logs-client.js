@@ -8,12 +8,6 @@
   var MAX_ENTRIES = 1000;
   var MAX_REASON = 2000;
   var PREVIEW_CHARS = 300;
-  // A copy of src/severity.js (plain data): the page has no module loader.
-  var SEVERITIES = ["low", "medium", "high", "send_to_it"];
-  var SEVERITY_TITLES = { low: "Low", medium: "Medium", high: "High", send_to_it: "Send to IT" };
-  var REASON_REQUIRED = ["high", "send_to_it"];
-  var REASON_OPTIONAL_LABEL = "Why is this an error? (optional)";
-  var REASON_REQUIRED_LABEL = "Why is this an error? (required for High and Send to IT)";
 
   var sessionIdEl = document.getElementById("sessionId");
   var lastPromptEl = document.getElementById("lastPrompt");
@@ -29,10 +23,6 @@
   var dialogHint = document.getElementById("logDialogHint");
   var cancelButton = document.getElementById("logCancel");
   var confirmButton = document.getElementById("logConfirm");
-  var severityFieldset = document.getElementById("logSeverity");
-  var severityInputs = Array.prototype.slice.call(severityFieldset.querySelectorAll("input[type=radio]"));
-  var savedSeverityEl = document.getElementById("logSavedSeverity");
-  var reasonLabel = document.getElementById("logReasonLabel");
 
   var sessions = [];
   var current = null; // { id, modified_at, cwd, project }
@@ -40,7 +30,6 @@
   var lastPromptAt = null;
   var reported = {}; // "<uuid>:<part>" -> true
   var reasons = {}; // "<uuid>:<part>" -> the reason saved with it
-  var severities = {}; // "<uuid>:<part>" -> the severity saved with it
   var pending = null; // { entry, row, sessionId, logged } while the dialog is open
   var timer = null;
   var busy = false;
@@ -140,10 +129,7 @@
       row.tabIndex = 0;
       row.setAttribute("role", "button");
       row.title = (entry.at ? formatDate(entry.at) + "\n" : "") + "Click to log this entry as an error in " + ERROR_LOG;
-      if (reported[ref]) {
-        row.classList.add("logged");
-        label.appendChild(severityBadge(severities[ref]));
-      }
+      if (reported[ref]) row.classList.add("logged");
       row.addEventListener("click", function () {
         var selection = window.getSelection ? window.getSelection() : null;
         if (selection && !selection.isCollapsed && row.contains(selection.anchorNode)) return; // copying text
@@ -158,46 +144,6 @@
     }
     entriesEl.appendChild(row);
   }
-
-  function isSeverity(v) {
-    return typeof v === "string" && SEVERITIES.indexOf(v) !== -1;
-  }
-
-  /** A severity badge: always the text label, never color alone. */
-  function severityBadge(severity) {
-    var id = isSeverity(severity) ? severity : "unrated";
-    return element("span", "sev-badge sev-" + id, isSeverity(severity) ? SEVERITY_TITLES[severity] : "Unrated");
-  }
-
-  function markLogged(row, ref) {
-    row.classList.add("logged");
-    var label = row.querySelector(".label");
-    if (!label) return;
-    var old = label.querySelector(".sev-badge");
-    if (old) label.removeChild(old);
-    label.appendChild(severityBadge(severities[ref]));
-  }
-
-  function pickedSeverity() {
-    for (var i = 0; i < severityInputs.length; i++) if (severityInputs[i].checked) return severityInputs[i].value;
-    return null;
-  }
-
-  function needsReason(severity) {
-    return REASON_REQUIRED.indexOf(severity) !== -1;
-  }
-
-  /** Log as error waits for a severity, and for a reason when High or Send to IT is picked. */
-  function updateConfirm() {
-    var severity = pickedSeverity();
-    var required = needsReason(severity);
-    reasonLabel.textContent = required ? REASON_REQUIRED_LABEL : REASON_OPTIONAL_LABEL;
-    reasonEl.required = required;
-    confirmButton.disabled = !severity || (required && !reasonEl.value.trim());
-  }
-
-  severityInputs.forEach(function (input) { input.addEventListener("change", updateConfirm); });
-  reasonEl.addEventListener("input", updateConfirm);
 
   function roleLabel(entry) {
     var kind = entry.kind === "tool_use" ? " · tool call" : entry.kind === "tool_result" ? " · tool result" : "";
@@ -215,22 +161,13 @@
     preview.textContent = clip(entry.text, PREVIEW_CHARS);
     reasonEl.value = logged ? reasons[ref] || "" : "";
     reasonEl.readOnly = logged;
-    severityInputs.forEach(function (input) { input.checked = false; });
-    severityFieldset.hidden = logged;
-    savedSeverityEl.hidden = !logged;
-    savedSeverityEl.textContent = "";
-    if (logged) {
-      savedSeverityEl.appendChild(document.createTextNode("Severity: "));
-      savedSeverityEl.appendChild(severityBadge(severities[ref]));
-    }
-    updateConfirm();
     reasonEl.placeholder = logged ? "No reason was given." : "What went wrong here?";
     confirmButton.hidden = logged;
     cancelButton.textContent = logged ? "Close" : "Cancel";
-    dialogHint.textContent = logged ? "Reasons and severities can't be edited here. Esc to close." : "1–4 picks a severity · Ctrl+Enter to log · Esc to cancel";
+    dialogHint.textContent = logged ? "Reasons can't be edited. Esc to close." : "Ctrl+Enter to log · Esc to cancel";
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
-    (logged ? cancelButton : severityInputs[0]).focus();
+    (logged ? cancelButton : reasonEl).focus();
   }
 
   function closeDialog() {
@@ -253,15 +190,6 @@
   });
 
   dialog.addEventListener("keydown", function (event) {
-    var digit = /^[1-4]$/.test(event.key) && !event.ctrlKey && !event.metaKey && !event.altKey;
-    if (digit && pending && !pending.logged && event.target !== reasonEl) {
-      event.preventDefault();
-      var input = severityInputs[Number(event.key) - 1];
-      input.checked = true;
-      input.focus();
-      updateConfirm();
-      return;
-    }
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       confirmLog();
@@ -274,12 +202,6 @@
     var row = pending.row;
     var sessionId = pending.sessionId;
     var reason = reasonEl.value.trim().slice(0, MAX_REASON);
-    var severity = pickedSeverity();
-    if (!severity || (needsReason(severity) && !reason)) {
-      updateConfirm();
-      (severity ? reasonEl : severityInputs[0]).focus();
-      return;
-    }
     closeDialog();
     if (row.classList.contains("saving")) return;
     row.classList.add("saving");
@@ -296,7 +218,6 @@
           at: entry.at ? String(entry.at) : null,
           text: String(entry.text || ""),
           reason: reason || null,
-          severity: severity,
         },
       }),
     })
@@ -307,12 +228,11 @@
             if (current && current.id === sessionId) {
               reported[ref] = true;
               if (body && typeof body.reason === "string" && body.reason) reasons[ref] = body.reason;
-              severities[ref] = body && isSeverity(body.severity) ? body.severity : severity;
             }
-            markLogged(row, ref);
+            row.classList.add("logged");
             setStatus(body && body.duplicate
-              ? "Already in " + ERROR_LOG + "; the first reason and severity were kept."
-              : "Added to " + ERROR_LOG + " as " + SEVERITY_TITLES[severity] + (reason ? ", with your reason." : "."), false);
+              ? "Already in " + ERROR_LOG + "; the first reason was kept."
+              : "Added to " + ERROR_LOG + (reason ? " with your reason." : "."), false);
           } else {
             setStatus(body && body.error && body.error.message ? body.error.message : "Could not write the error log (HTTP " + res.status + ").", true);
           }
@@ -343,11 +263,6 @@
         var first = next === null;
         var stick = first || nearBottom();
         if (Array.isArray(body.reported)) body.reported.forEach(function (ref) { reported[ref] = true; });
-        if (body.severities && typeof body.severities === "object") {
-          Object.keys(body.severities).forEach(function (ref) {
-            if (isSeverity(body.severities[ref])) severities[ref] = body.severities[ref];
-          });
-        }
         if (body.reasons && typeof body.reasons === "object") {
           Object.keys(body.reasons).forEach(function (ref) {
             if (typeof body.reasons[ref] === "string") reasons[ref] = body.reasons[ref];
@@ -382,7 +297,6 @@
     lastPromptAt = null;
     reported = {};
     reasons = {};
-    severities = {};
     entriesEl.textContent = "";
     setStatus(session ? "Loading…" : "No Claude sessions found in ~/.claude/projects.", false);
     renderHeader();

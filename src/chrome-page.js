@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import { escapeHtml, serializeChat } from "./markdown.js";
 import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES } from "./stages.js";
-import { severityOptions } from "./logs-page.js";
 
 function artifactTitle(session) {
   try {
@@ -168,16 +167,12 @@ export function createChromeHtml(session, { baseUrl, canResume = false, workflow
   </aside>
 </div>
 <div id="logPopover" role="dialog" aria-label="Claude log entry" hidden>
-  <fieldset id="logSeverity" class="severity-picker compact">
-    <legend>Severity (needed to log as an error)</legend>
-    ${severityOptions("logSeverityChoice")}
-  </fieldset>
-  <label for="logNote" id="logNoteLabel">Note to agent / reason (optional)</label>
+  <label for="logNote">Note to agent / reason (optional)</label>
   <textarea id="logNote" rows="3" placeholder="What went wrong here?"></textarea>
   <div class="popover-actions">
     <button id="logSend" type="button" class="primary">Send to agent</button>
-    <button id="logError" type="button" disabled>Log as error</button>
-    <button id="logBoth" type="button" disabled>Both</button>
+    <button id="logError" type="button">Log as error</button>
+    <button id="logBoth" type="button">Both</button>
     <button id="logCancel" type="button" class="link">Cancel</button>
   </div>
 </div>

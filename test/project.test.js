@@ -115,9 +115,7 @@ test("project store: stable keys, last_seen order, a cap of 50, prototype keys r
   const store = new SessionStore(stateDir);
   const a = await registerProject(store, path.join(stateDir, "a"));
   assert.deepEqual([a.key, a.name], [sessionKey(path.join(stateDir, "a")), "a"]);
-  await new Promise((r) => setTimeout(r, 5));
   await registerProject(store, path.join(stateDir, "b"));
-  await new Promise((r) => setTimeout(r, 5));
   const again = await registerProject(store, path.join(stateDir, "a"));
   assert.equal(again.key, a.key);
   assert.equal(again.registered_at, a.registered_at, "registration time is kept");

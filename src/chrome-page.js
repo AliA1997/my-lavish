@@ -29,7 +29,7 @@ function workflowView(wf, baseUrl) {
   return { id: wf.id, name: wf.name, current: wf.current, stages };
 }
 
-export function createChromeHtml(session, { baseUrl, canResume = false, workflow = null } = {}) {
+export function createChromeHtml(session, { baseUrl, canResume = false, workflow = null, errorLogFile = "the error log" } = {}) {
   const file = session.source_file ?? session.file;
   const data = {
     key: session.key,
@@ -63,7 +63,7 @@ export function createChromeHtml(session, { baseUrl, canResume = false, workflow
 <title>${title}</title>
 <link rel="stylesheet" href="/chrome.css">
 </head>
-<body data-base-url="${escapeHtml(baseUrl ?? "")}">
+<body data-base-url="${escapeHtml(baseUrl ?? "")}" data-error-log="${escapeHtml(errorLogFile)}">
 <div id="app">
   <main id="stage">
     <div id="revisionBar" role="status" hidden><span id="revisionBarText"></span> <button id="backToLatest" type="button">Back to latest</button></div>

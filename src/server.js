@@ -24,6 +24,7 @@ import {
   requirementsFile, stageFile, updateStage,
 } from "./workflow-store.js";
 import { createHomeHtml } from "./home-page.js";
+import { resolvePaths } from "./paths.js";
 import { findProjectRoot, isPlanFileName, listSuperpowersPlans } from "./project.js";
 import { getProject, isProjectKey, listProjects, registerProject } from "./project-store.js";
 import { CONTENT_TYPES, PUBLIC_ASSETS, readAsset } from "./assets.js";
@@ -132,7 +133,8 @@ export function createServer({
   launchClaude = realLaunchClaude,
   claudeStatus = realClaudeStatus,
   claudeDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"),
-  errorLogFile = path.join(os.homedir(), "claude-errors", "error-log.json"),
+  errorLogFile = resolvePaths().errorLogFile,
+  logDir = null, // shown in the console banner; server.log itself is opened by whoever starts the server
   agentPollMs = AGENT_POLL_MS,
   presenceGraceMs = PRESENCE_GRACE_MS,
   connectCooldownMs = CONNECT_COOLDOWN_MS,
@@ -403,7 +405,7 @@ export function createServer({
   app.use(express.json({ limit: "5mb" }));
 
   app.get("/health", (req, res) => {
-    res.json({ ok: true, app: "my-lavish-axi", version, state_dir: stateDir });
+    res.json({ ok: true, app: "my-lavish-axi", version });
   });
 
   app.post("/shutdown", (req, res) => {
@@ -1690,7 +1692,7 @@ export function createServer({
       const canResume = isClaudeSessionId(session.claude_session_id)
         && Boolean(await findTranscript(session.claude_session_id, { claudeDir }).catch(() => null));
       const workflow = session.workflow_id ? await getWorkflow(store, session.workflow_id) : null;
-      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow }));
+      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow, errorLogFile }));
     } catch (e) {
       next(e);
     }
@@ -1707,7 +1709,7 @@ export function createServer({
       res.set("X-Frame-Options", "DENY");
       res.set("Content-Security-Policy", "frame-ancestors 'none'");
       const project = await projectFor(req.query.project);
-      res.type("html").send(createLogsHtml({ baseUrl, projectKey: project?.key ?? null }));
+      res.type("html").send(createLogsHtml({ baseUrl, projectKey: project?.key ?? null, errorLogFile }));
     } catch (e) {
       next(e);
     }

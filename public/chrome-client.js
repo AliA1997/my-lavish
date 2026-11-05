@@ -9,7 +9,7 @@
   var SNAPSHOT_TIMEOUT_MS = 5000;
   var RECONNECT_DELAYS_MS = [1000, 2000, 5000];
   var STUCK_AFTER_MS = 45000; // a launched Claude that has not polled by now needs the user's help
-  var ERROR_LOG = "~/claude-errors/error-log.json";
+  var ERROR_LOG = (document.body && document.body.getAttribute("data-error-log")) || "the error log"; // the real path, from the server (see-plan paths)
   var LOG_TAG = "claude-log";
   var ALLOW_RULE = '"Bash(see-plan:*)"';
   var STAGES = ["plan", "interrogation", "implementation", "verification"];

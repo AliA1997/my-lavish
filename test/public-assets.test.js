@@ -126,7 +126,7 @@ test("the recent-sessions picker is on the page and wired in the client", async 
   const source = await fetchAsset(baseUrl, "chrome-client.js");
   assert.ok(source.includes('"/api/claude-sessions"'));
   assert.ok(source.includes('"claude-log"'));
-  assert.ok(source.includes("~/claude-errors/error-log.json"));
+  assert.ok(source.includes("data-error-log"), "the error log path comes from the page (see-plan paths)");
 });
 
 test("the Claude log page and its files are served", async (t) => {

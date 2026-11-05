@@ -1,8 +1,20 @@
 # Changelog
 
-## [Unreleased] - planned for 3.3.0
+## [Unreleased] - planned for a later release
 
 The rest of the 2026-11-03 plan (`docs/superpowers/plans/2026-11-03-logs-sessions-plans-fixes.md`, Tasks 2–4): log hand-off, session management and plan management. Its stage inference for plan folders and its Claude-session cache shipped early (0.3.0, and again in 3.2.0).
+
+## [3.3.0] - 2026-11-04
+
+Phase 1 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-output.md`: standard state paths. Not breaking: existing installs keep working with no data loss.
+
+### Standard paths
+- New `src/paths.js` owns every see-plan path. State, data (`error-log.json`), logs (`server.log`), the runtime file and the optional `config.json` now follow each platform's standard: XDG on Linux, `~/Library` on macOS (explicit `XDG_*` wins), `%LOCALAPPDATA%` / `%APPDATA%` on Windows.
+- Precedence per path: env override, then the **legacy folder** (`~/.my-lavish-axi`, `~/claude-errors/error-log.json`) while it exists and the new one doesn't, then the platform default.
+- New `MY_LAVISH_DATA_DIR`. `MY_LAVISH_STATE_DIR` now also moves `server.log` and the runtime file.
+- New **`see-plan paths [--json]`**: every path and the rule that chose it. SKILL.md, the poll `next_step`, the `/claude` tip and the panel take the error log path from it instead of a hardcoded `~/claude-errors`.
+- New **`see-plan migrate [--dry-run]`**: stops the server, copies the legacy data, checks it (JSON parses, counts match), and renames the old ones to `*.migrated-<date>`. It never deletes, and refuses when the new location already has data. Bare `see-plan` prints `legacy_paths: run see-plan migrate` while legacy paths are in use.
+- `/health` no longer returns `state_dir`.
 
 ## [3.2.0] - 2026-11-04
 

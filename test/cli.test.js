@@ -264,9 +264,8 @@ test("poll --claude-session rejects a bad id", async (t) => {
 const logPrompt = { prompt: "Add this Claude log entry", tag: "claude-log", target: { entry: { text: "boom" } } };
 
 test("poll next_step for claude-log prompts no longer asks the agent to write files", () => {
-  const home = path.join("C:", "Users", "me");
-  const log = path.join(home, "claude-errors", "error-log.json");
-  const only = createPollOutput({ file: "f.html", home, response: { status: "feedback", prompts: [logPrompt] } });
+  const log = path.join("C:", "Users", "me", "AppData", "Local", "see-plan", "data", "error-log.json");
+  const only = createPollOutput({ file: "f.html", errorLogFile: log, response: { status: "feedback", prompts: [logPrompt] } });
   assert.ok(only.next_step.includes(`\`${log}\``));
   assert.match(only.next_step, /One prompt is tagged `claude-log`/);
   assert.match(only.next_step, /already wrote them/);
@@ -274,11 +273,11 @@ test("poll next_step for claude-log prompts no longer asks the agent to write fi
   assert.match(only.next_step, /Then poll again with `see-plan poll f\.html --agent-reply/);
   assert.doesNotMatch(only.next_step, /Apply/);
 
-  const mixed = createPollOutput({ file: "f.html", home, response: { status: "feedback", prompts: [logPrompt, logPrompt, { prompt: "x", tag: "h1" }] } });
+  const mixed = createPollOutput({ file: "f.html", errorLogFile: log, response: { status: "feedback", prompts: [logPrompt, logPrompt, { prompt: "x", tag: "h1" }] } });
   assert.match(mixed.next_step, /2 prompts are tagged/);
   assert.match(mixed.next_step, /Apply the other prompts to the HTML file in place/);
 
-  const ended = createPollOutput({ file: "f.html", home, response: { status: "feedback", session_ended: true, prompts: [logPrompt] } });
+  const ended = createPollOutput({ file: "f.html", errorLogFile: log, response: { status: "feedback", session_ended: true, prompts: [logPrompt] } });
   assert.ok(ended.next_step.includes(log));
   assert.match(ended.next_step, /Report what you did in chat, and do not poll again\.$/);
 });
@@ -457,4 +456,117 @@ test("status, stage, feature, and prune commands", async (t) => {
   const help = fakeIo(env);
   await run(["--help"], help.io);
   for (const cmd of ["status", "stage", "feature", "prune"]) assert.ok(help.stdout().includes(`see-plan ${cmd}`), cmd);
+});
+
+/** An env whose home and platform folders are all inside `root`, so paths, legacy folders and migrate are isolated. */
+function isolatedEnv(root, extra = {}) {
+  return {
+    ...process.env,
+    HOME: root,
+    USERPROFILE: root,
+    LOCALAPPDATA: path.join(root, "AppData", "Local"),
+    APPDATA: path.join(root, "AppData", "Roaming"),
+    XDG_STATE_HOME: path.join(root, ".local", "state"),
+    XDG_DATA_HOME: path.join(root, ".local", "share"),
+    XDG_CONFIG_HOME: path.join(root, ".config"),
+    XDG_RUNTIME_DIR: "",
+    MY_LAVISH_STATE_DIR: "",
+    MY_LAVISH_ERROR_LOG: "",
+    MY_LAVISH_DATA_DIR: "",
+    MY_LAVISH_NO_OPEN: "1",
+    MY_LAVISH_SERVER_WINDOW: "hidden",
+    ...extra,
+  };
+}
+
+async function legacyHome(t) {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-home-"));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }).catch(() => {}));
+  const state = path.join(root, ".my-lavish-axi");
+  await fs.promises.mkdir(path.join(state, "revisions", "0123456789abcdef"), { recursive: true });
+  await fs.promises.writeFile(path.join(state, "state.json"), JSON.stringify({ version: 1, sessions: { a: { key: "a" }, b: { key: "b" } } }));
+  await fs.promises.writeFile(path.join(state, "revisions", "0123456789abcdef", "0.html"), "<p>r0</p>");
+  await fs.promises.writeFile(path.join(state, "server.log"), "old log\n");
+  await fs.promises.mkdir(path.join(root, "claude-errors"));
+  await fs.promises.writeFile(path.join(root, "claude-errors", "error-log.json"), JSON.stringify([{ uuid: "1" }, { uuid: "2" }, { uuid: "3" }]));
+  await fs.promises.writeFile(path.join(root, "claude-errors", "notes.txt"), "the user's own file");
+  return root;
+}
+
+test("paths shows legacy sources, and bare see-plan says to migrate", async (t) => {
+  const root = await legacyHome(t);
+  const env = isolatedEnv(root);
+  const a = fakeIo(env);
+  assert.equal(await run(["paths", "--json"], a.io), 0);
+  const out = JSON.parse(a.stdout());
+  const byName = Object.fromEntries(out.paths.map((r) => [r.name, r]));
+  assert.equal(byName.state.source, "legacy");
+  assert.equal(byName.state.path, path.join(root, ".my-lavish-axi"));
+  assert.equal(byName.error_log.source, "legacy");
+  assert.match(out.next_step, /see-plan migrate/);
+  const h = fakeIo(env);
+  assert.equal(await run(["--json"], h.io), 0);
+  assert.equal(JSON.parse(h.stdout()).legacy_paths, "run see-plan migrate");
+});
+
+test("migrate: --dry-run writes nothing; a real run copies, checks and renames; a second run has nothing to do", async (t) => {
+  const root = await legacyHome(t);
+  const env = isolatedEnv(root, { MY_LAVISH_PORT: String(await freePort()) });
+  const before = await fs.promises.readdir(root);
+  const dry = fakeIo(env);
+  assert.equal(await run(["migrate", "--dry-run", "--json"], dry.io), 0);
+  const plan = JSON.parse(dry.stdout());
+  assert.equal(plan.dry_run, true);
+  assert.deepEqual(plan.would_migrate.map((m) => [m.what, m.sessions ?? m.records]), [["state", 2], ["error_log", 3]]);
+  assert.deepEqual(await fs.promises.readdir(root), before, "a dry run writes nothing");
+
+  const real = fakeIo(env);
+  assert.equal(await run(["migrate", "--json"], real.io), 0, real.stdout());
+  const done = JSON.parse(real.stdout());
+  assert.equal(done.migrated.length, 2);
+  const now = (await import("../src/paths.js")).resolvePaths({ env });
+  assert.equal(now.usesLegacy, false);
+  assert.equal(Object.keys(JSON.parse(await fs.promises.readFile(path.join(now.stateDir, "state.json"), "utf8")).sessions).length, 2);
+  assert.ok(fs.existsSync(path.join(now.stateDir, "revisions", "0123456789abcdef", "0.html")));
+  assert.equal(JSON.parse(await fs.promises.readFile(now.errorLogFile, "utf8")).length, 3);
+  assert.equal(await fs.promises.readFile(now.logFile, "utf8"), "old log\n", "server.log moves to the log dir");
+  assert.ok(!fs.existsSync(path.join(root, ".my-lavish-axi")), "the legacy folder was renamed");
+  assert.ok((await fs.promises.readdir(root)).some((n) => /^\.my-lavish-axi\.migrated-\d{4}-\d{2}-\d{2}$/.test(n)));
+  assert.ok((await fs.promises.readdir(path.join(root, "claude-errors"))).some((n) => n.startsWith("error-log.json.migrated-")));
+  assert.equal(await fs.promises.readFile(path.join(root, "claude-errors", "notes.txt"), "utf8"), "the user's own file", "other files are untouched");
+
+  const again = fakeIo(env);
+  assert.equal(await run(["migrate", "--json"], again.io), 0);
+  assert.match(JSON.parse(again.stdout()).next_step, /Nothing to migrate/);
+});
+
+test("migrate refuses when the new location already has data, and stops a running server first", async (t) => {
+  const root = await legacyHome(t);
+  const env = isolatedEnv(root, { MY_LAVISH_PORT: String(await freePort()) });
+  const target = (await import("../src/paths.js")).resolvePaths({ env, exists: () => false }).errorLogFile;
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  await fs.promises.writeFile(target, "[]");
+  // The error log target exists, so resolvePaths no longer picks the legacy log; only state is planned.
+  const r = fakeIo(env);
+  assert.equal(await run(["open", path.join(root, "x.html"), "--json"], fakeIo(env).io), 1); // missing file: no server needed
+  const f = path.join(root, "page.html");
+  await fs.promises.writeFile(f, "<html><body>hi</body></html>");
+  assert.equal(await run(["open", f, "--json"], fakeIo(env).io), 0, "a server is running on the legacy state");
+  assert.equal(await run(["migrate", "--json"], r.io), 0, r.stdout());
+  const out = JSON.parse(r.stdout());
+  assert.equal(out.server_stopped, true, "the running server was stopped first");
+  assert.deepEqual(out.migrated.map((m) => m.what), ["state"]);
+  t.after(() => run(["stop"], fakeIo(env).io).catch(() => {}));
+
+  // A target that exists while the source is still legacy (a race) is refused.
+  const root2 = await legacyHome(t);
+  const env2 = isolatedEnv(root2);
+  const p2 = (await import("../src/paths.js")).resolvePaths({ env: env2 });
+  assert.equal(p2.source.stateDir, "legacy");
+  const realExists = fs.existsSync;
+  t.mock.method(fs, "existsSync", (p) => (p === p2.defaults.stateDir ? true : realExists(p)));
+  const refused = fakeIo(env2);
+  // configOf sees the target now "exists", so state is no longer legacy: nothing planned for it.
+  assert.equal(await run(["migrate", "--dry-run", "--json"], refused.io), 0);
+  assert.ok(!JSON.parse(refused.stdout()).would_migrate?.some((m) => m.what === "state"));
 });

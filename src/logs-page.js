@@ -7,7 +7,7 @@ export function severityOptions(name) {
 }
 
 /** The full-page Claude log view: no plan, just the newest (or chosen) Claude session's transcript. */
-export function createLogsHtml({ baseUrl, projectKey = null } = {}) {
+export function createLogsHtml({ baseUrl, projectKey = null, errorLogFile = "the error log" } = {}) {
   const errorsHref = projectKey ? `/errors?project=${encodeURIComponent(projectKey)}` : "/errors";
   return `<!doctype html>
 <html lang="en">
@@ -17,7 +17,7 @@ export function createLogsHtml({ baseUrl, projectKey = null } = {}) {
 <title>Claude session logs</title>
 <link rel="stylesheet" href="/logs.css">
 </head>
-<body data-base-url="${escapeHtml(baseUrl ?? "")}">
+<body data-base-url="${escapeHtml(baseUrl ?? "")}" data-error-log="${escapeHtml(errorLogFile)}">
 <nav id="pageNav" aria-label="Pages"><a href="/">Dashboard</a> <a href="${escapeHtml(errorsHref)}">Error logs</a></nav>
 <header id="top">
   <div id="identity">
@@ -30,7 +30,7 @@ export function createLogsHtml({ baseUrl, projectKey = null } = {}) {
     <select id="sessionSelect"></select>
   </div>
 </header>
-<p id="tip">Click an entry to log it as an error in ~/claude-errors/error-log.json. You can say why before it is saved.</p>
+<p id="tip">Click an entry to log it as an error in <code>${escapeHtml(errorLogFile)}</code>. You can say why before it is saved. <code>see-plan paths</code> shows where see-plan keeps its files.</p>
 <p id="status" role="status" aria-live="polite"></p>
 <main id="entries"></main>
 <dialog id="logDialog" aria-labelledby="logDialogTitle">

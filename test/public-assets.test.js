@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createServer } from "../src/server.js";
+import { authHeaders, createServer, rawFetch } from "./helpers/authed-server.js";
 import { SessionStore } from "../src/session-store.js";
 import { createChromeHtml } from "../src/chrome-page.js";
 
@@ -74,7 +74,7 @@ test("one connection card replaces the status line, banner, and hint", async (t)
   assert.ok(!/"[^"\n]*[Rr]econnecting[^"\n]*"/.test(source), "a reconnect cycle is never shown to the user (error codes aside)");
   assert.ok(source.includes("STUCK_AFTER_MS = 45000"));
   assert.ok(source.includes("Bash(see-plan:*)"));
-  assert.ok(source.includes('"/api/claude-status"'));
+  assert.ok(source.includes('"/api/claude-status?key="'), "claude-status follows the session's environment (H2)");
 });
 
 test("panel UX: queue above tabs, destructive actions behind a menu and a confirm, first-run tip, ARIA tabs", async (t) => {

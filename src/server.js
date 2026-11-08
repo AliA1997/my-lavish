@@ -30,6 +30,9 @@ import { getProject, isProjectKey, listProjects, registerProject } from "./proje
 import { CONTENT_TYPES, PUBLIC_ASSETS, readAsset } from "./assets.js";
 import { createClaudeSessionLister, findLastPromptAt, findTranscript, readTranscript } from "./claude-log.js";
 import { buildPrompt, claudeStatus as realClaudeStatus, findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
+import { bearerOf, capFor, cookieNameFor, cookieValueFor, createNonceStore, createToken, parseCookies, safeEqual, safeNext } from "./auth.js";
+import { scheduleIdleWarnings } from "./console-log.js";
+import { detectEnvironment, parseEnvHeader } from "./environment.js";
 
 export { PUBLIC_ASSETS };
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -37,7 +40,7 @@ const PING_INTERVAL_MS = 30000;
 const CONNECT_COOLDOWN_MS = 60000;
 export const AGENT_POLL_MS = 110000; // under Claude Code's default 120 s Bash timeout
 const PRESENCE_GRACE_MS = 20000; // a re-poll within this window is invisible to the user
-const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424 };
+const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424, LAUNCHER_OFF: 409 };
 const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409, UNSENT_NOTES: 409, NOT_CURRENT: 409 };
 const MAX_FEEDBACK_TEXT = 4000;
 const LOG_ROLES = new Set(["user", "assistant"]);
@@ -92,7 +95,8 @@ function originOf(value) {
 /** True only when an Origin header is present and equals http://<Host>. */
 export function requireSameOrigin(req) {
   const origin = req.headers.origin;
-  return typeof origin === "string" && origin === `http://${req.headers.host}`;
+  if (typeof origin !== "string") return false;
+  return origin === `http://${req.headers.host}` || (req.seePlanForwarded === true && origin === `https://${req.headers.host}`);
 }
 
 function errorBody(code, message) {
@@ -109,7 +113,9 @@ function isCrossSite(req) {
   const site = req.headers["sec-fetch-site"];
   if (site !== undefined && site !== "same-origin" && site !== "none") return true;
   const source = req.headers.origin ?? req.headers.referer;
-  return source !== undefined && originOf(source) !== `http://${req.headers.host}`;
+  if (source === undefined) return false;
+  const o = originOf(source);
+  return o !== `http://${req.headers.host}` && !(req.seePlanForwarded === true && o === `https://${req.headers.host}`);
 }
 
 const MAX_TIMER_MS = 2147483647;
@@ -140,7 +146,23 @@ export function createServer({
   connectCooldownMs = CONNECT_COOLDOWN_MS,
   claudeSessionTtlMs = 30000,
   projectHome = os.homedir(), // D9: never a project root (tests point it elsewhere)
+  token = createToken(), // T2: every API call, page and WebSocket needs it (bearer or cookie); there is no off switch
+  allowedHosts = [], // H5: extra exact Host names (port forwarders); only ever added on top of the token check
+  nonceTtlMs = 60000,
+  launcherConfig = {}, // H3: { launcher, terminal } from MY_LAVISH_LAUNCHER / MY_LAVISH_TERMINAL / config.json
+  idleWarnings = false, // S4: log the idle countdown at 5 min and 1 min (the server window shows it)
 }) {
+  let cancelIdleWarnings = null;
+  const clientEnvs = new Map(); // key -> the newest caller's environment (H2), in memory only
+  /** H2: keeps the newest valid X-See-Plan-Env per session (size-capped and schema-checked; never in state.json). */
+  function rememberEnv(key, req) {
+    const env = parseEnvHeader(req.headers["x-see-plan-env"]);
+    if (env) clientEnvs.set(key, env);
+  }
+  /** The environment Connect Claude should use: the session's newest caller, else the server's own. */
+  const environmentFor = (key) => clientEnvs.get(key) ?? detectEnvironment();
+  // Log lines name a session by its file name and count notes; note and transcript text are never logged (S4).
+  const titleOf = (s) => path.basename(s?.source_file ?? s?.file ?? "session");
   const claudeSessions = createClaudeSessionLister({ ttlMs: claudeSessionTtlMs });
   const app = express();
   const events = new EventEmitter();
@@ -324,23 +346,27 @@ export function createServer({
     let connected = activePolls.size + homeSockets.size;
     for (const set of sockets.values()) connected += set.size;
     if (connected > 0) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
+      clearIdle();
     } else if (!idleTimer) {
       idleTimer = setTimeout(() => {
         log(`idle for ${idleTimeoutMs} ms, shutting down`);
-        close().then(() => {
-          if (exitOnIdle) process.exit(0);
-        });
+        shutdown("idle"); // the server process exits once "closed" is emitted (cmdServer)
       }, idleTimeoutMs);
       idleTimer.unref();
+      if (idleWarnings) cancelIdleWarnings = scheduleIdleWarnings(idleTimeoutMs, log);
     }
+  }
+
+  function clearIdle() {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+    cancelIdleWarnings?.();
+    cancelIdleWarnings = null;
   }
 
   // The log page polls over plain HTTP: each read restarts the idle countdown.
   function touchIdle() {
-    clearTimeout(idleTimer);
-    idleTimer = null;
+    clearIdle();
     updateIdle();
   }
 
@@ -384,19 +410,65 @@ export function createServer({
 
   app.disable("x-powered-by");
 
+  // H5: hosts a port forwarder uses (Codespaces, VS Code). Exact names only; the token check below always runs.
+  const extraHosts = new Set(allowedHosts.map((h) => String(h).trim().toLowerCase()).filter(Boolean));
+  const hostAllowed = (hostHeader) => {
+    const name = hostnameOf(hostHeader);
+    return ALLOWED_HOSTNAMES.has(name) || extraHosts.has(name);
+  };
+  const sameOriginSource = (req, source) => {
+    const o = originOf(source);
+    return o === `http://${req.headers.host}` || (extraHosts.has(hostnameOf(req.headers.host)) && o === `https://${req.headers.host}`);
+  };
+
+  // ---- T5: the token (bearer for the CLI, cookie for the browser) ----
+  const nonces = createNonceStore({ ttlMs: nonceTtlMs });
+  const cookieValue = cookieValueFor(token);
+  let boundPort = port;
+  const cookieName = () => cookieNameFor(boundPort);
+  const hasBearer = (req) => safeEqual(bearerOf(req.headers.authorization) ?? "", token);
+  const hasCookie = (req) => safeEqual(parseCookies(req.headers.cookie).get(cookieName()) ?? "", cookieValue);
+  const authed = (req) => hasBearer(req) || hasCookie(req);
+  const publicPaths = new Set(PUBLIC_ASSETS.map((n) => `/${n}`));
+  /** Open without a token: health, the login link, static files, and artifact frames (they carry a capability, T6). */
+  function authExempt(req) {
+    if (req.method !== "GET" && req.method !== "HEAD") return false;
+    return req.path === "/health" || req.path === "/auth" || publicPaths.has(req.path) || req.path.startsWith("/artifact/");
+  }
+  const AUTH_MESSAGE = "This see-plan server needs its token. A 3.x see-plan cannot talk to it: upgrade see-plan. In a browser, run `see-plan url` in a terminal to get a sign-in link.";
+
+  function unauthorizedPage() {
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in to see-plan</title>
+<style>:root{color-scheme:light dark}body{font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;max-width:36rem;margin:15vh auto;padding:0 16px}code{background:rgba(127,127,127,.15);padding:2px 6px;border-radius:4px}</style></head>
+<body><h1>Sign in to see-plan</h1><p>Run <code>see-plan url</code> in a terminal to get a sign-in link, then open it here.</p>
+<p>A link works once and expires after a minute. Opening a review with <code>see-plan &lt;file&gt;</code> signs you in too.</p></body></html>`;
+  }
+
   // Host allowlist: blocks DNS rebinding.
   app.use((req, res, next) => {
-    if (!ALLOWED_HOSTNAMES.has(hostnameOf(req.headers.host))) {
+    if (!hostAllowed(req.headers.host)) {
       return res.status(403).json(errorBody("FORBIDDEN_HOST", "Host not allowed"));
     }
+    if (extraHosts.has(hostnameOf(req.headers.host))) req.seePlanForwarded = true; // X-Forwarded-Proto is trusted only here
     next();
+  });
+
+  // Token check, right after the Host allowlist. The Origin checks below stay as defence in depth.
+  app.use((req, res, next) => {
+    if (authExempt(req) || authed(req)) return next();
+    const page = req.method === "GET" && !req.path.startsWith("/api/");
+    if (page) {
+      res.set("Cache-Control", "no-store");
+      return res.status(401).type("html").send(unauthorizedPage());
+    }
+    res.status(401).json(errorBody("AUTH_REQUIRED", AUTH_MESSAGE));
   });
 
   // Origin guard: blocks cross-site writes. Header-less (CLI) requests pass.
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") return next();
     const source = req.headers.origin ?? req.headers.referer;
-    if (source !== undefined && originOf(source) !== `http://${req.headers.host}`) {
+    if (source !== undefined && !sameOriginSource(req, source)) {
       return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
     }
     next();
@@ -405,12 +477,30 @@ export function createServer({
   app.use(express.json({ limit: "5mb" }));
 
   app.get("/health", (req, res) => {
-    res.json({ ok: true, app: "my-lavish-axi", version });
+    res.json({ ok: true, app: "my-lavish-axi", version, auth: "token" });
+  });
+
+  // T4: the CLI (bearer only, not a cookie) asks for a single-use, 60 s login nonce...
+  app.post("/api/auth/nonce", (req, res) => {
+    if (!hasBearer(req)) return res.status(401).json(errorBody("AUTH_REQUIRED", "Sign-in links are made by the see-plan CLI"));
+    res.json({ nonce: nonces.issue(), expires_in_ms: nonceTtlMs });
+  });
+
+  // ...and the browser trades it for the cookie, then lands on `next` (a same-origin path only).
+  app.get("/auth", (req, res) => {
+    const next = safeNext(req.query.next);
+    if (next === null) return res.status(400).json(errorBody("VALIDATION_ERROR", "next must be a same-origin path"));
+    res.set("Cache-Control", "no-store");
+    res.set("Referrer-Policy", "no-referrer");
+    if (!nonces.consume(req.query.t)) return res.status(401).type("html").send(unauthorizedPage());
+    const https = req.seePlanForwarded === true && String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https";
+    res.set("Set-Cookie", `${cookieName()}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/${https ? "; Secure" : ""}`);
+    res.redirect(303, next);
   });
 
   app.post("/shutdown", (req, res) => {
     res.json({ ok: true });
-    res.on("finish", () => setImmediate(() => close().catch(() => {})));
+    res.on("finish", () => setImmediate(() => shutdown("see-plan stop").catch(() => {})));
   });
 
   app.post("/api/sessions", async (req, res, next) => {
@@ -448,6 +538,7 @@ export function createServer({
         return sendStoreError(res, e);
       }
       const { status, session } = result;
+      rememberEnv(session.key, req);
       res.json({ status, key: session.key, url: session.url, stage: session.stage ?? null, stage_source: session.stage_source ?? null });
     } catch (e) {
       next(e);
@@ -463,6 +554,7 @@ export function createServer({
     }
     await watchSession(session);
     notifyHome();
+    if (status !== "user-ended") log(`session ${status}: ${titleOf(session)}`);
     return result;
   }
 
@@ -765,7 +857,10 @@ export function createServer({
         return sendStoreError(res, e);
       }
       const agentNear = Boolean(activePolls.get(key)?.listening) || inGrace(key);
-      if (accepted > 0) events.emit("feedback", key);
+      if (accepted > 0) {
+        events.emit("feedback", key);
+        log(`feedback sent: ${accepted} note(s)${end ? " and ended" : ""}`);
+      }
       for (const p of prompts) {
         if (p.tag !== "chat") continue;
         const inferred = inferStageFromText(p.prompt);
@@ -821,6 +916,7 @@ export function createServer({
       clearGrace(key);
       events.emit("ended", key);
       broadcast(key, { type: "ended", ended_by: endedBy });
+      log(`session ended by ${endedBy}`);
       res.json({ ok: true, ended_by: endedBy });
     } catch (e) {
       next(e);
@@ -1216,16 +1312,15 @@ export function createServer({
     }
   });
 
-  let statusCache = null; // findClaude spawns `where`/`which`: once per process is enough
+  // findClaude caches its `where`/`which` lookup; the strategy follows the session's newest caller (H2, H3).
   app.get("/api/claude-status", async (req, res, next) => {
     try {
       if (isCrossSite(req)) {
         return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
       }
-      statusCache ??= claudeStatus();
-      res.json(await statusCache);
+      const key = typeof req.query.key === "string" && SESSION_KEY.test(req.query.key) ? req.query.key : null;
+      res.json(await claudeStatus({ environment: key ? environmentFor(key) : detectEnvironment(), settings: launcherConfig }));
     } catch (e) {
-      statusCache = null;
       next(e);
     }
   });
@@ -1293,6 +1388,9 @@ export function createServer({
               }),
             })
             : buildPrompt({ file, stage: session.stage }),
+          feature: wf?.name,
+          environment: environmentFor(key), // H2: where the newest see-plan command for this session ran
+          config: launcherConfig,
         });
       } catch (e) {
         if (pendingLaunch.get(key) === launch) pendingLaunch.delete(key);
@@ -1303,7 +1401,14 @@ export function createServer({
       if (!resume) await linkClaudeSession(key, sessionId);
       if (wf && session.stage) await updateStage(store, wf.id, session.stage, { claude_session_id: sessionId });
       const mode = launched?.mode ?? "powershell";
-      res.json({ ok: true, claude_session_id: sessionId, mode, ...(launched?.command ? { command: launched.command } : {}) });
+      log(`Connect Claude launched: ${titleOf(session)} (${launched?.strategy ?? mode})`);
+      res.json({
+        ok: true, claude_session_id: sessionId, mode,
+        ...(launched?.strategy ? { strategy: launched.strategy } : {}),
+        ...(launched?.strategy_reasons ? { strategy_reasons: launched.strategy_reasons } : {}),
+        ...(launched?.tmux_window ? { tmux_window: launched.tmux_window } : {}),
+        ...(launched?.command ? { command: launched.command } : {}),
+      });
     } catch (e) {
       next(e);
     }
@@ -1489,7 +1594,7 @@ export function createServer({
       }
       res.json({
         ok: true,
-        status: result.duplicate ? "already_logged" : "logged",
+        status: result.duplicate ? "already_logged" : (log(`error logged (${e.severity})`), "logged"),
         duplicate: result.duplicate,
         reason: result.reason, // on a duplicate, the reason saved the first time
         severity: result.severity, // ...and the severity saved the first time
@@ -1568,6 +1673,8 @@ export function createServer({
     }
     const existing = await store.getSession(key);
     if (!existing) return res.status(404).json({ status: "missing" });
+    rememberEnv(key, req);
+    if (closing) return res.json({ status: "waiting", reconnect: true }); // S5: the next poll restarts the server
     watchSession(existing);
     if (vanished) return;
     if (activePolls.has(key)) {
@@ -1644,6 +1751,7 @@ export function createServer({
           pendingLaunch.delete(key);
           agents.set(key, { agent: poll.agent, sessionId: poll.sessionId, working: false });
           broadcastPresence(key);
+          log(`poll connected: ${titleOf(existing)}${poll.agent ? ` (${poll.agent})` : ""}`);
           if (effectiveTimeout > 0) {
             timer = setTimeout(() => {
               timedOut = true;
@@ -1665,6 +1773,10 @@ export function createServer({
         return;
       }
       if (timedOut && result.status === "waiting" && isAgent) result = { status: "waiting", reconnect: true };
+      if (closing && result.status === "waiting") result = { status: "waiting", reconnect: true };
+      log(result.status === "feedback"
+        ? `poll returned: ${titleOf(existing)}, ${result.prompts?.length ?? 0} note(s)${result.session_ended ? ", session ended" : ""}`
+        : `poll returned: ${titleOf(existing)}, ${result.reconnect ? "reconnect" : result.status}`);
       if (result.status === "feedback" && !result.session_ended) {
         agents.set(key, { agent: poll.agent, sessionId: poll.sessionId, working: true });
         poll.delivered = true;
@@ -1692,7 +1804,7 @@ export function createServer({
       const canResume = isClaudeSessionId(session.claude_session_id)
         && Boolean(await findTranscript(session.claude_session_id, { claudeDir }).catch(() => null));
       const workflow = session.workflow_id ? await getWorkflow(store, session.workflow_id) : null;
-      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow, errorLogFile }));
+      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow, errorLogFile, artifactBase: `/artifact/${session.key}/${capFor(token, session.key)}` }));
     } catch (e) {
       next(e);
     }
@@ -1729,8 +1841,12 @@ export function createServer({
     }
   });
 
-  app.get("/artifact/:key/index.html", async (req, res, next) => {
+  // T6: artifact frames are sandboxed (opaque origin, so maybe no cookie): their URL carries a capability instead.
+  const capOk = (req) => SESSION_KEY.test(req.params.key) && safeEqual(String(req.params.cap ?? ""), capFor(token, req.params.key));
+
+  app.get("/artifact/:key/:cap/index.html", async (req, res, next) => {
     try {
+      if (!capOk(req)) return res.status(404).json(errorBody("NOT_FOUND", "Unknown artifact"));
       const session = await store.getSession(req.params.key);
       if (!session) return res.status(404).json(errorBody("NOT_FOUND", "Unknown session"));
       let html;
@@ -1747,8 +1863,9 @@ export function createServer({
     }
   });
 
-  app.get("/artifact/:key/*splat", async (req, res, next) => {
+  app.get("/artifact/:key/:cap/*splat", async (req, res, next) => {
     try {
+      if (!capOk(req)) return res.status(404).json(errorBody("NOT_FOUND", "Unknown artifact"));
       const session = await store.getSession(req.params.key);
       if (!session) return res.status(404).json(errorBody("NOT_FOUND", "Unknown session"));
       const rel = [].concat(req.params.splat).join("/");
@@ -1791,11 +1908,12 @@ export function createServer({
   async function onUpgrade(req, socket, head) {
     socket.on("error", () => {});
     const hostHeader = req.headers.host;
-    if (!ALLOWED_HOSTNAMES.has(hostnameOf(hostHeader))) return rejectUpgrade(socket, 403, "Forbidden");
+    if (!hostAllowed(hostHeader)) return rejectUpgrade(socket, 403, "Forbidden");
     const origin = req.headers.origin;
-    if (origin !== undefined && originOf(origin) !== `http://${hostHeader}`) {
+    if (origin !== undefined && !sameOriginSource(req, origin)) {
       return rejectUpgrade(socket, 403, "Forbidden");
     }
+    if (!authed(req)) return rejectUpgrade(socket, 401, "Unauthorized"); // T5: the cookie (or the CLI's bearer)
     let pathname;
     try {
       pathname = new URL(req.url, "http://localhost").pathname;
@@ -1878,6 +1996,7 @@ export function createServer({
       });
       httpServer.once("listening", () => {
         const actual = httpServer.address().port;
+        boundPort = actual;
         baseUrl = `http://127.0.0.1:${actual}`;
         pingTimer = setInterval(pingAll, PING_INTERVAL_MS);
         pingTimer.unref();
@@ -1889,31 +2008,56 @@ export function createServer({
     });
   }
 
-  function close() {
+  /**
+   * S5: the one clean shutdown, shared by signals (cmdServer), POST /shutdown and the idle timeout.
+   * 1. stop accepting connections; 2. answer waiting polls with { status: "waiting", reconnect: true };
+   * 3. close WebSockets with 1001; 4. wait for in-flight store writes. (5 and 6, removing server.json and
+   * exiting, are cmdServer's.) Emits "closed" when done.
+   */
+  function shutdown(reason = null) {
     if (closing) return closing;
+    if (reason) log(`shutting down (${reason})`);
     closing = (async () => {
       clearInterval(pingTimer);
-      clearTimeout(idleTimer);
+      clearIdle();
       for (const g of graces.values()) clearTimeout(g.timer);
       graces.clear();
-      for (const poll of activePolls.values()) poll.notify();
       clearTimeout(homeTimer);
-      for (const set of sockets.values()) for (const ws of set) ws.terminate();
-      for (const ws of homeSockets) ws.terminate();
+      const stopped = new Promise((resolve) => {
+        if (!httpServer?.listening) return resolve();
+        httpServer.close(() => resolve());
+      });
+      for (const poll of activePolls.values()) poll.notify();
+      const allSockets = [...[...sockets.values()].flatMap((set) => [...set]), ...homeSockets];
+      const socketsClosed = Promise.all(allSockets.map((ws) => new Promise((resolve) => {
+        if (ws.readyState === ws.CLOSED) return resolve();
+        ws.once("close", resolve);
+        try {
+          ws.close(1001, "see-plan server shutting down");
+        } catch {
+          resolve();
+        }
+      })));
       wss.close();
       await Promise.allSettled([...watchers.values()].map((w) => w.close()));
       watchers.clear();
-      await new Promise((resolve) => {
-        if (!httpServer) return resolve();
-        httpServer.close(() => resolve());
-        httpServer.closeAllConnections?.();
-      });
-      // Let socket "close" handlers run (they may restore taken feedback), then drain.
+      // Let the polls answer, then drain background work and any queued state.json writes.
       await new Promise((resolve) => setImmediate(resolve));
       while (background.size) await Promise.allSettled([...background]);
+      await store.drain?.();
+      await Promise.race([socketsClosed, new Promise((resolve) => setTimeout(resolve, 500).unref())]);
+      for (const ws of allSockets) ws.terminate();
+      httpServer?.closeAllConnections?.();
+      await stopped;
+      // Let socket "close" handlers run (they may restore taken feedback), then drain again.
+      await new Promise((resolve) => setImmediate(resolve));
+      while (background.size) await Promise.allSettled([...background]);
+      await store.drain?.();
     })().then(() => events.emit("closed"));
     return closing;
   }
 
-  return { app, events, listen, close };
+  const close = () => shutdown(null);
+
+  return { app, events, listen, close, shutdown, token, authExempt };
 }

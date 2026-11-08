@@ -85,6 +85,11 @@ export class SessionStore {
     });
   }
 
+  /** Resolves once every transaction queued so far has finished (a clean shutdown waits for it, S5). */
+  drain() {
+    return this.#mutex.runExclusive(async () => {});
+  }
+
   /** Runs fn(state) under the store's lock; fn returns [result, dirty]. For modules that keep data in state.json. */
   transact(fn) {
     return this.#tx(fn);

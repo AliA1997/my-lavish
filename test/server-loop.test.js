@@ -8,7 +8,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
-import { createServer } from "../src/server.js";
+import { authHeaders, createServer, rawFetch, tokenFor } from "./helpers/authed-server.js";
+import { capFor } from "../src/auth.js";
 import { SessionStore } from "../src/session-store.js";
 
 async function setup(t, opts = {}) {
@@ -49,7 +50,7 @@ const note = (text) => ({ prompt_id: `p-${++seq}`, prompt: text, tag: "h1", sele
 
 function connectWs(port, key) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/events/${key}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/events/${key}`, { headers: authHeaders(port) });
     const messages = [];
     const checks = new Set();
     ws.on("message", (d) => {
@@ -79,7 +80,7 @@ function connectWs(port, key) {
 
 function wsAttempt(port, p, headers = {}) {
   return new Promise((resolve) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}${p}`, { headers });
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${p}`, { headers: { ...authHeaders(port), ...headers } });
     ws.on("unexpected-response", (req, res) => {
       resolve(res.statusCode);
       req.destroy();
@@ -217,6 +218,7 @@ test("feedback taken by a poll whose client vanished is restored", async (t) => 
     host: "127.0.0.1",
     port,
     agent: false,
+    headers: authHeaders(port),
     path: `/api/poll?file=${encodeURIComponent(file)}&timeoutMs=5000`,
   });
   req.on("error", () => {});
@@ -412,8 +414,8 @@ test("websocket upgrade is guarded", async (t) => {
 });
 
 test("artifact assets are served with no-cache", async (t) => {
-  const { baseUrl, key } = await setup(t);
-  const r = await fetch(`${baseUrl}/artifact/${key}/style.css`);
+  const { baseUrl, key, port } = await setup(t);
+  const r = await fetch(`${baseUrl}/artifact/${key}/${capFor(tokenFor(port), key)}/style.css`);
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("cache-control"), "no-cache");
 });
@@ -962,11 +964,22 @@ test("notes sent with no agent around are only queued", async (t) => {
 
 test("claude-status reports how Connect Claude would launch", async (t) => {
   let calls = 0;
-  const status = { platform: "linux", launch: "copy", claude_found: true, claude_path: "/usr/bin/claude" };
-  const { baseUrl } = await setup(t, { claudeStatus: async () => { calls++; return status; } });
+  const status = { platform: "linux", launch: "copy", claude_found: true, claude_path: "/usr/bin/claude", strategy: "copy", strategy_reasons: ["neither DISPLAY nor WAYLAND_DISPLAY is set"] };
+  const seen = [];
+  const { baseUrl, key, file, postJson } = await setup(t, { claudeStatus: async (o) => { calls++; seen.push(o); return status; }, launcherConfig: { launcher: "auto" } });
   assert.deepEqual(await (await fetch(`${baseUrl}/api/claude-status`)).json(), status);
-  await fetch(`${baseUrl}/api/claude-status`);
-  assert.equal(calls, 1, "cached per process");
+  // H2: the session's newest caller decides the strategy: here, a CLI that ran over SSH.
+  const sshEnv = JSON.stringify({ gui: false, remote: true, container: false, wsl: false, tmux: false, ci: false, platform: "linux", reasons: ["SSH_CONNECTION or SSH_TTY is set (an SSH session)"], tmux_socket: null });
+  await postJson("/api/sessions", { file }, { "x-see-plan-env": sshEnv });
+  await fetch(`${baseUrl}/api/claude-status?key=${key}`);
+  assert.equal(seen.at(-1).environment.remote, true);
+  assert.deepEqual(seen.at(-1).settings, { launcher: "auto" });
+  // A malformed or oversized header is ignored, never stored.
+  await postJson("/api/sessions", { file }, { "x-see-plan-env": JSON.stringify({ gui: "yes" }) });
+  await postJson("/api/sessions", { file }, { "x-see-plan-env": "x".repeat(3000) });
+  await fetch(`${baseUrl}/api/claude-status?key=${key}`);
+  assert.equal(seen.at(-1).environment.remote, true, "the last valid environment is kept");
+  assert.equal(calls, 3);
   assert.equal((await fetch(`${baseUrl}/api/claude-status`, { headers: { "Sec-Fetch-Site": "cross-site" } })).status, 403);
 });
 

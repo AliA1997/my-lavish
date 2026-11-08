@@ -102,7 +102,8 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   #connection[data-state="working"] .dot,
-  #connection[data-state="starting"] .dot {
+  #connection[data-state="starting"] .dot,
+  #connection[data-state="tmux"] .dot {
     animation: none;
   }
 }
@@ -750,7 +751,8 @@ dialog button:focus-visible,
 }
 
 #connection[data-state="working"] .dot,
-#connection[data-state="starting"] .dot {
+#connection[data-state="starting"] .dot,
+#connection[data-state="tmux"] .dot {
   background: var(--accent);
   animation: agent-pulse 1.2s ease-in-out infinite;
 }

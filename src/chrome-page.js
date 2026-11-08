@@ -29,7 +29,7 @@ function workflowView(wf, baseUrl) {
   return { id: wf.id, name: wf.name, current: wf.current, stages };
 }
 
-export function createChromeHtml(session, { baseUrl, canResume = false, workflow = null, errorLogFile = "the error log" } = {}) {
+export function createChromeHtml(session, { baseUrl, canResume = false, workflow = null, errorLogFile = "the error log", artifactBase = `/artifact/${session.key}` } = {}) {
   const file = session.source_file ?? session.file;
   const data = {
     key: session.key,
@@ -47,10 +47,11 @@ export function createChromeHtml(session, { baseUrl, canResume = false, workflow
     poll_command: `see-plan poll ${quoteArg(file)}${session.stage ? ` --stage ${session.stage}` : ""}`,
     history: (session.history ?? []).map((h) => ({ ended_at: h.ended_at ?? null, ended_by: h.ended_by ?? null, chat: serializeChat(h.chat ?? []) })),
     workflow: workflowView(workflow, baseUrl ?? ""),
+    artifact_base: artifactBase,
   };
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
   const title = escapeHtml(artifactTitle(session));
-  const src = `/artifact/${encodeURIComponent(session.key)}/index.html?rev=${session.revision}`;
+  const src = `${artifactBase}/index.html?rev=${session.revision}`;
   const stageOptions = STAGES.map((s) => `<option value="${s}">${STAGE_TITLES[s]}</option>`).join("");
   const chips = SESSION_FEEDBACK_CATEGORIES.map(
     (c) => `<label class="chip"><input type="checkbox" name="category" value="${c}"> ${escapeHtml(CATEGORY_TITLES[c])}</label>`,

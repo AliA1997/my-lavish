@@ -127,7 +127,7 @@ test("resume uses --resume with the validated id", async () => {
 
 test("claudeStatus reports how a launch would work", async () => {
   const find = async () => "/usr/bin/claude";
-  assert.deepEqual(await claudeStatus({ platform: "win32", findClaude: async () => "C:\\c.exe" }), { platform: "win32", launch: "powershell", claude_found: true, claude_path: "C:\\c.exe" });
+  assert.deepEqual(await claudeStatus({ platform: "win32", findClaude: async () => "C:\\c.exe" }), { platform: "win32", launch: "powershell", claude_found: true, claude_path: "C:\\c.exe", strategy: "terminal", strategy_reasons: [] });
   assert.equal((await claudeStatus({ platform: "darwin", findClaude: find })).launch, "osascript");
   assert.equal((await claudeStatus({ platform: "linux", findClaude: find, which: async () => "/usr/bin/xterm" })).launch, "terminal");
   const none = await claudeStatus({ platform: "linux", findClaude: async () => null, which: async () => null });

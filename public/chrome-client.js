@@ -318,7 +318,9 @@
     if (presence.listening) return "connected"; // also during a silent 1:50 reconnect (cycling)
     if (presence.working) return "working";
     if (launch && launch.mode === "copy") return "unsupported";
+    if (launch && launch.mode === "tmux") return Date.now() - launch.at >= STUCK_AFTER_MS ? "stuck" : "tmux";
     if (launch) return Date.now() - launch.at >= STUCK_AFTER_MS ? "stuck" : "starting";
+    if (claudeInfo && claudeInfo.launch === "off") return "off";
     if (claudeInfo && (claudeInfo.launch === "copy" || claudeInfo.claude_found === false)) return "unsupported";
     return "idle";
   }
@@ -330,6 +332,12 @@
 
   function show(button, on) { button.hidden = !on; }
 
+  /** H6: why a launch could not open a window, in words (the reasons come from the CLI's environment). */
+  function reasonsText(reasons) {
+    if (!reasons || !reasons.length) return "";
+    return " (" + reasons.slice(0, 3).join("; ") + ")";
+  }
+
   function renderConnection() {
     var state = ended ? "ended" : connectionState();
     connection.setAttribute("data-state", state);
@@ -340,11 +348,20 @@
     if (state === "connected") text = who + " connected — waiting for your feedback" + sid;
     else if (state === "working") text = who + " is working on your feedback" + sid;
     else if (state === "starting") text = "Starting Claude… " + clock(Date.now() - launch.at);
-    else if (state === "stuck") text = "Claude hasn't started polling. Check the Claude window: it may be asking to trust this folder, to log in, or to allow see-plan.";
-    else if (state === "unsupported") {
+    else if (state === "tmux") {
+      text = "Started in tmux window " + (launch.tmux_window || "see-plan") + "; attach with tmux select-window -t " + (launch.tmux_window || "see-plan") + ". " + clock(Date.now() - launch.at);
+    } else if (state === "stuck") {
+      text = launch && launch.mode === "tmux"
+        ? "Claude hasn't started polling. Open the tmux window " + (launch.tmux_window || "see-plan") + ": it may be asking to trust this folder, to log in, or to allow see-plan."
+        : "Claude hasn't started polling. Check the Claude window: it may be asking to trust this folder, to log in, or to allow see-plan." +
+          (launch && launch.reasons && launch.reasons.length ? " Opened with " + (launch.strategy || launch.mode) + reasonsText(launch.reasons) + "." : "");
+    } else if (state === "off") {
+      text = "Connect Claude is turned off here (MY_LAVISH_LAUNCHER=off). Connect an agent manually below.";
+    } else if (state === "unsupported") {
+      var why = reasonsText((launch && launch.reasons) || (claudeInfo && claudeInfo.strategy_reasons));
       text = claudeInfo && claudeInfo.claude_found === false && !(launch && launch.command)
         ? "Claude Code was not found on this computer. Install it, or connect an agent manually below."
-        : "Can't open a terminal here. Run this in your terminal:";
+        : "No terminal window can be opened here" + why + ". Run this in a terminal:";
     } else text = "No agent connected.";
     connectionLabel.textContent = text;
     if (presence.last_poll_at && (state === "connected" || state === "working")) {
@@ -354,9 +371,10 @@
     }
     var command = launch && launch.command ? launch.command : "";
     show(connectButton, state === "idle" || (state === "unsupported" && !command && !(claudeInfo && claudeInfo.claude_found === false)));
+    if (state === "off") show(connectButton, false);
     connectButton.textContent = state === "unsupported" ? "Get the command" : "Connect Claude";
     show(resumeClaudeButton, state === "idle" && canResume);
-    show(cancelConnectButton, state === "starting");
+    show(cancelConnectButton, state === "starting" || state === "tmux");
     show(retryConnectButton, state === "stuck");
     show(copyAllowButton, state === "stuck");
     show(copyCommandButton, (state === "stuck" || state === "unsupported") && Boolean(command));
@@ -389,8 +407,9 @@
     launchTimer = null;
   }
 
-  function startLaunchClock(mode, command) {
-    launch = { at: Date.now(), mode: mode, command: command || "" };
+  function startLaunchClock(mode, command, extra) {
+    var info = extra || {};
+    launch = { at: Date.now(), mode: mode, command: command || "", strategy: info.strategy || mode, reasons: info.strategy_reasons || [], tmux_window: info.tmux_window || "" };
     clearInterval(launchTimer);
     if (mode !== "copy") {
       launchTimer = setInterval(function () {
@@ -424,7 +443,7 @@
           }
           if (!targetKey || targetKey === key) {
             if (body.claude_session_id) onClaudeSession(body.claude_session_id);
-            startLaunchClock(body.mode || "powershell", body.command);
+            startLaunchClock(body.mode || "powershell", body.command, body);
           }
           return true;
         });
@@ -448,7 +467,7 @@
   }
 
   function loadClaudeStatus() {
-    fetch("/api/claude-status")
+    fetch("/api/claude-status?key=" + encodeURIComponent(key))
       .then(readJson)
       .then(function (body) {
         if (body && typeof body.launch === "string") {
@@ -839,7 +858,8 @@
     pendingRestore = lastScroll;
     previousSnapshot = currentSnapshot;
     frame.removeAttribute("srcdoc");
-    frame.src = "/artifact/" + encodeURIComponent(key) + "/index.html?rev=" + encodeURIComponent(String(revision));
+    // The artifact URL carries a capability (the frame is sandboxed, so it may not send the sign-in cookie).
+    frame.src = String(boot.artifact_base || "") + "/index.html?rev=" + encodeURIComponent(String(revision));
   }
 
   // ---- revisions -----------------------------------------------------------

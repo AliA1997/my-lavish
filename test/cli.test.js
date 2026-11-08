@@ -15,7 +15,7 @@ function fakeIo(env = {}) {
     io: {
       stdout: { write: (s) => out.push(s) },
       stderr: { write: (s) => err.push(s) },
-      env: { MY_LAVISH_NO_OPEN: "1", ...env },
+      env: { MY_LAVISH_NO_OPEN: "1", MY_LAVISH_SERVER_WINDOW: "hidden", ...env },
     },
     stdout: () => out.join(""),
     stderr: () => err.join(""),
@@ -101,6 +101,17 @@ async function fakeServer(t, handler) {
   return server.address().port;
 }
 
+/** Fetches from a CLI-started server with the token from its runtime file, as the CLI does. */
+async function authedFetch(env, url, init = {}) {
+  const { token } = JSON.parse(await fs.promises.readFile(path.join(env.MY_LAVISH_STATE_DIR, "server.json"), "utf8"));
+  return fetch(url, { ...init, headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` } });
+}
+
+/** The runtime file a real server writes after listen: the CLI reads the token from it (T3). */
+async function fakeRuntime(dir, port) {
+  await fs.promises.writeFile(path.join(dir, "server.json"), JSON.stringify({ port, pid: process.pid, token: "fake-token-for-tests", version: "test", mode: "hidden" }));
+}
+
 async function tmpHtml(t) {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-cli-"));
   t.after(() => fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {}));
@@ -113,11 +124,12 @@ test("poll reports LISTENER_ACTIVE on 409", async (t) => {
   const { dir, file } = await tmpHtml(t);
   const port = await fakeServer(t, (req, res) => {
     res.setHeader("content-type", "application/json");
-    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi" }));
+    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi", auth: "token" }));
     req.resume();
     res.statusCode = 409;
     res.end(JSON.stringify({ error: { code: "LISTENER_ACTIVE", message: "busy" } }));
   });
+  await fakeRuntime(dir, port);
   const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
   assert.equal(await run(["poll", file, "--agent-reply", "x", "--json"], a.io), 1);
   const out = JSON.parse(a.stdout());
@@ -152,6 +164,7 @@ test("invalid MY_LAVISH_PORT is a VALIDATION_ERROR", async () => {
 test("open reports PORT_IN_USE when another app owns the port", async (t) => {
   const { dir, file } = await tmpHtml(t);
   const port = await fakeServer(t, (req, res) => res.end("not json"));
+  await fakeRuntime(dir, port);
   const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
   assert.equal(await run(["open", file, "--json"], a.io), 1);
   assert.equal(JSON.parse(a.stdout()).error.code, "PORT_IN_USE");
@@ -231,7 +244,7 @@ test("open --with-claude prints the claude session id", async (t) => {
   const seen = [];
   const port = await fakeServer(t, (req, res) => {
     res.setHeader("content-type", "application/json");
-    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi" }));
+    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi", auth: "token" }));
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
@@ -240,6 +253,7 @@ test("open --with-claude prints the claude session id", async (t) => {
       res.end(JSON.stringify({ ok: true, claude_session_id: id }));
     });
   });
+  await fakeRuntime(dir, port);
   const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
   assert.equal(await run(["open", file, "--with-claude", "--json"], a.io), 0);
   const out = JSON.parse(a.stdout());
@@ -255,6 +269,7 @@ test("poll --claude-session rejects a bad id", async (t) => {
     requests++;
     res.end("{}");
   });
+  await fakeRuntime(dir, port);
   const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) });
   assert.equal(await run(["poll", file, "--claude-session", "nope", "--json"], a.io), 1);
   assert.equal(JSON.parse(a.stdout()).error.code, "VALIDATION_ERROR");
@@ -298,7 +313,7 @@ test("poll sends the agent and its Claude session with the request", async (t) =
   const bodies = [];
   const port = await fakeServer(t, (req, res) => {
     res.setHeader("content-type", "application/json");
-    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi" }));
+    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi", auth: "token" }));
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
@@ -306,6 +321,7 @@ test("poll sends the agent and its Claude session with the request", async (t) =
       res.end(JSON.stringify({ status: "waiting" }));
     });
   });
+  await fakeRuntime(dir, port);
   const a = fakeIo({ MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port), CLAUDECODE: "1", CLAUDE_CODE_SESSION_ID: id });
   assert.equal(await run(["poll", file, "--json"], a.io), 0);
   assert.deepEqual(bodies.map((b) => b.url), ["/api/poll"], "no separate attach request");
@@ -323,7 +339,8 @@ test("logs prints the Claude log page; bare see-plan opens it only from a termin
   assert.equal(await run(["logs", "--json"], l.io), 0);
   const { logs } = JSON.parse(l.stdout());
   assert.deepEqual(logs, { url: `http://127.0.0.1:${env.MY_LAVISH_PORT}/claude`, status: "ready" });
-  assert.equal((await fetch(logs.url)).status, 200);
+  assert.equal((await fetch(logs.url)).status, 401, "a page without the sign-in cookie or token is refused (T5)");
+  assert.equal((await authedFetch(env, logs.url)).status, 200);
 
   const agent = fakeIo(env);
   assert.equal(await run(["--json"], agent.io), 0);
@@ -349,7 +366,7 @@ test("error-logs registers a project folder; elsewhere it shows only sessions; b
   assert.equal(inProject.project.name, "repo");
   assert.match(inProject.url, new RegExp(`^${base}/errors\\?project=[0-9a-f]{16}$`));
   assert.match(next_step, /quoted data/);
-  const html = await (await fetch(inProject.url)).text();
+  const html = await (await authedFetch(env, inProject.url)).text();
   assert.equal(html.match(/role="tab"/g).length, 4);
 
   const plain = path.join(dir, "plain");
@@ -359,7 +376,7 @@ test("error-logs registers a project folder; elsewhere it shows only sessions; b
   const out = JSON.parse(n.stdout());
   assert.deepEqual([out.error_logs.mode, out.error_logs.url, out.error_logs.project], ["sessions-only", `${base}/errors`, undefined]);
   assert.match(out.next_step, /only recent sessions/);
-  assert.equal((await (await fetch(out.error_logs.url)).text()).match(/role="tab"/g).length, 1);
+  assert.equal((await (await authedFetch(env, out.error_logs.url)).text()).match(/role="tab"/g).length, 1);
 
   const human = fakeIo(env);
   human.io.stdout.isTTY = true;
@@ -373,7 +390,7 @@ test("poll defaults to 110000 ms under Claude Code; explicit --timeout-ms wins",
   const bodies = [];
   const port = await fakeServer(t, (req, res) => {
     res.setHeader("content-type", "application/json");
-    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi" }));
+    if (req.url === "/health") return res.end(JSON.stringify({ ok: true, app: "my-lavish-axi", auth: "token" }));
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
@@ -381,6 +398,7 @@ test("poll defaults to 110000 ms under Claude Code; explicit --timeout-ms wins",
       res.end(JSON.stringify({ status: "waiting", reconnect: true }));
     });
   });
+  await fakeRuntime(dir, port);
   const base = { MY_LAVISH_STATE_DIR: dir, MY_LAVISH_PORT: String(port) };
   assert.equal(await run(["poll", file, "--json"], fakeIo({ ...base, CLAUDECODE: "1" }).io), 0);
   assert.equal(bodies[0].timeoutMs, 110000);

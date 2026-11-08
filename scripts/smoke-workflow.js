@@ -34,7 +34,7 @@ try {
   const post = async (p, body, page = false) => {
     const res = await fetch(baseUrl + p, {
       method: "POST",
-      headers: { "content-type": "application/json", ...(page ? { Origin: baseUrl } : {}) },
+      headers: { "content-type": "application/json", authorization: `Bearer ${srv.token}`, ...(page ? { Origin: baseUrl } : {}) },
       body: JSON.stringify(body),
     });
     const json = await res.json();
@@ -42,7 +42,8 @@ try {
     return json;
   };
   // The page's file; for a Markdown plan, the generated html (the CLI maps .md to .html the same way).
-  const fileOf = async (key) => (await (await fetch(`${baseUrl}/api/${key}/status`)).json()).session.file.replace(/\.md$/, ".html");
+  const get = (p) => fetch(baseUrl + p, { headers: { authorization: `Bearer ${srv.token}` } });
+  const fileOf = async (key) => (await (await get(`/api/${key}/status`)).json()).session.file.replace(/\.md$/, ".html");
 
   const created = await post("/api/workflows", { name: "export-csv", dir, requirements: "Users can export reports as CSV." });
   const wfId = created.workflow.id;
@@ -67,7 +68,7 @@ try {
       assert(decided.next === null && decided.workflow.current === null, "the workflow finishes");
     }
   }
-  const wf = (await (await fetch(`${baseUrl}/api/workflows/${wfId}`)).json()).workflow;
+  const wf = (await (await get(`/api/workflows/${wfId}`)).json()).workflow;
   assert(order.every((s) => wf.stages[s].status === "done" && wf.stages[s].claude_session_id), "every stage done, each with its own Claude session");
   assert(new Set(order.map((s) => wf.stages[s].claude_session_id)).size === 4, "four distinct Claude sessions");
   for (const f of ["export-csv.requirements.md", "export-csv.plan.md", "export-csv.interrogation.html", "export-csv.progress.html", "export-csv.verification.html"]) {

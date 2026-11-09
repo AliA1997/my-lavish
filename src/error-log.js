@@ -14,9 +14,14 @@ const cache = new Map(); // file -> { mtimeMs, size, gen, records }: the parsed 
 let gen = 0; // bumped on every write, so a read that raced a write never caches what it saw
 
 const refOf = (r) => `${r.uuid}:${Number(r.part) || 0}`;
-const isRecord = (r) => r !== null && typeof r === "object" && typeof r.uuid === "string" && typeof r.claude_session_id === "string";
+export const isRecord = (r) => r !== null && typeof r === "object" && typeof r.uuid === "string" && typeof r.claude_session_id === "string";
 const severityOf = (r) => (isSeverity(r.severity) ? r.severity : null);
 const UNCLASSIFIED = { context: "session", review_key: null, stage: null };
+
+/** The parsed records in `file` ([] when it is missing), cached until the file changes. */
+export async function readErrorRecords(file) {
+  return readRecords(file);
+}
 
 async function readRecords(file) {
   let stat;
@@ -57,7 +62,7 @@ async function writeRecords(file, records) {
   await fs.promises.rename(tmp, file); // a crash mid-write never leaves a half-written log
 }
 
-function findRecord(records, { claude_session_id: id, uuid, part }) {
+export function findRecord(records, { claude_session_id: id, uuid, part }) {
   const ref = refOf({ uuid, part });
   return records.find((r) => isRecord(r) && r.claude_session_id === id && refOf(r) === ref);
 }
@@ -72,8 +77,7 @@ async function append(file, record) {
   const records = await readRecords(file);
   const saved = findRecord(records, record);
   if (saved) {
-    // The first reason and severity are kept.
-    return { duplicate: true, reason: typeof saved.reason === "string" ? saved.reason : null, severity: severityOf(saved) };
+    return duplicateResult(saved);
   }
   try {
     await writeRecords(file, [...records, record]);
@@ -81,7 +85,7 @@ async function append(file, record) {
     gen++;
     cache.delete(file);
   }
-  return { duplicate: false, reason: record.reason ?? null, severity: severityOf(record) };
+  return appendedResult(record);
 }
 
 /** Appends `record` to the JSON array in `file` (created if missing); a record already there is skipped. */
@@ -98,15 +102,8 @@ export function rateErrorRecord(file, ref, severity, reason) {
     if (!isSeverity(severity)) throw new ErrorLogError(`severity must be one of ${SEVERITIES.join(", ")}`, "VALIDATION_ERROR");
     const records = await readRecords(file);
     const saved = findRecord(records, ref);
-    if (!saved) throw new ErrorLogError("No such error record", "MISSING");
-    if (severityOf(saved)) throw new ErrorLogError("This record already has a severity", "ALREADY_RATED");
-    const hasReason = typeof saved.reason === "string" && saved.reason.trim() !== "";
-    const extra = typeof reason === "string" ? reason.trim() : "";
-    if (needsReason(severity) && !hasReason && !extra) throw new ErrorLogError("High and Send to IT need a reason", "VALIDATION_ERROR");
-    const updated = records.map((r) => {
-      if (r !== saved) return r;
-      return { ...r, severity, ...(hasReason || !extra ? {} : { reason: extra }), rated_at: new Date().toISOString() };
-    });
+    const patch = ratingPatch(saved, severity, reason);
+    const updated = records.map((r) => (r === saved ? { ...r, ...patch } : r));
     try {
       await writeRecords(file, updated);
     } finally {
@@ -119,12 +116,40 @@ export function rateErrorRecord(file, ref, severity, reason) {
 }
 
 /**
+ * D6 as a pure rule, shared by every store: the fields to add to `saved` when it is rated now.
+ * Throws MISSING, ALREADY_RATED or VALIDATION_ERROR.
+ */
+export function ratingPatch(saved, severity, reason) {
+  if (!isSeverity(severity)) throw new ErrorLogError(`severity must be one of ${SEVERITIES.join(", ")}`, "VALIDATION_ERROR");
+  if (!saved) throw new ErrorLogError("No such error record", "MISSING");
+  if (severityOf(saved)) throw new ErrorLogError("This record already has a severity", "ALREADY_RATED");
+  const hasReason = typeof saved.reason === "string" && saved.reason.trim() !== "";
+  const extra = typeof reason === "string" ? reason.trim() : "";
+  if (needsReason(severity) && !hasReason && !extra) throw new ErrorLogError("High and Send to IT need a reason", "VALIDATION_ERROR");
+  return { severity, ...(hasReason || !extra ? {} : { reason: extra }), rated_at: new Date().toISOString() };
+}
+
+/** What appending a record returns when `saved` is already there (the first reason and severity are kept). */
+export function duplicateResult(saved) {
+  return { duplicate: true, reason: typeof saved.reason === "string" ? saved.reason : null, severity: severityOf(saved) };
+}
+
+/** What appending a new `record` returns. */
+export function appendedResult(record) {
+  return { duplicate: false, reason: record.reason ?? null, severity: severityOf(record) };
+}
+
+/**
  * The records of one Claude session, so the page can mark entries already logged:
  * `refs` lists "<uuid>:<part>", `reasons` maps a ref to its saved reason (only refs that have one),
  * and `severities` maps a ref to its severity (only rated refs).
  */
 export async function reportedRecords(file, claudeSessionId) {
-  const records = await readRecords(file).catch(() => []);
+  return reportedFrom(await readRecords(file).catch(() => []), claudeSessionId);
+}
+
+/** reportedRecords over records already in memory. */
+export function reportedFrom(records, claudeSessionId) {
   const mine = records.filter((r) => isRecord(r) && r.claude_session_id === claudeSessionId);
   const reasons = Object.create(null);
   const severities = Object.create(null);
@@ -144,7 +169,7 @@ function classified(r, lookup) {
   return lookup?.get(r.claude_session_id) ?? UNCLASSIFIED;
 }
 
-function view(r, lookup) {
+export function view(r, lookup) {
   return { ...r, ...classified(r, lookup), severity: severityOf(r), reason: typeof r.reason === "string" && r.reason ? r.reason : null };
 }
 
@@ -157,8 +182,13 @@ function newestFirst(records) {
 }
 
 /** One page of records, newest first, filtered by context and severity ("unrated" = no severity). */
-export async function listErrorRecords(file, { context, severity, limit = 50, offset = 0 } = {}, lookup) {
-  const records = (await readRecords(file)).filter(isRecord);
+export async function listErrorRecords(file, opts, lookup) {
+  return listFrom(await readRecords(file), opts, lookup);
+}
+
+/** listErrorRecords over records already in memory. */
+export function listFrom(all, { context, severity, limit = 50, offset = 0 } = {}, lookup) {
+  const records = all.filter(isRecord);
   const matching = newestFirst(records)
     .map((r) => view(r, lookup))
     .filter((r) => (!context || r.context === context)
@@ -170,7 +200,12 @@ export async function listErrorRecords(file, { context, severity, limit = 50, of
 
 /** One record, classified, or null. */
 export async function getErrorRecord(file, ref, lookup) {
-  const saved = findRecord(await readRecords(file), ref);
+  return getFrom(await readRecords(file), ref, lookup);
+}
+
+/** getErrorRecord over records already in memory. */
+export function getFrom(records, ref, lookup) {
+  const saved = findRecord(records, ref);
   return saved ? view(saved, lookup) : null;
 }
 
@@ -189,7 +224,12 @@ function bump(map, k, severity) {
  * plus `bySession` (Claude session id) and `byReview` (review key) maps of { count, worst }.
  */
 export async function summarizeErrorRecords(file, lookup) {
-  const records = (await readRecords(file)).filter(isRecord);
+  return summarizeFrom(await readRecords(file), lookup);
+}
+
+/** summarizeErrorRecords over records already in memory. */
+export function summarizeFrom(all, lookup) {
+  const records = all.filter(isRecord);
   const counts = { session: emptyCounts(), plan: emptyCounts() };
   const bySession = new Map();
   const byReview = new Map();

@@ -234,6 +234,8 @@ None are required; the defaults work out of the box. Set them only to change the
 | `MY_LAVISH_PORT` | `4388` | Server port |
 | `MY_LAVISH_STATE_DIR` | platform standard; see `see-plan paths` | Holds `state.json`, `revisions/` and `feedback.jsonl`. Setting it also moves `server.log` and the runtime file `server.json` there, so an isolated server never reads another one's token |
 | `MY_LAVISH_DATA_DIR` | platform standard; see `see-plan paths` | Holds `error-log.json` |
+| `USE_ERROR_SEARCH` | unset | `true` turns on `see-plan errors similar` and `errors store` (experimental) |
+| `USE_PINECONE` | unset | `true`, with `PINECONE_API_KEY` set, stores errors in Pinecone instead of the local file and turns on error search (experimental). Error text leaves this machine |
 | `MY_LAVISH_NO_OPEN` | unset | `1` = never launch a browser (same as `--no-open`) |
 | `MY_LAVISH_IDLE_TIMEOUT_MS` | `1800000` | Server exits after this long with no WebSocket or poll connections; `0` or `off` disables |
 | `MY_LAVISH_ERROR_LOG` | `<data dir>/error-log.json` | Where the server writes logged errors (wins over `MY_LAVISH_DATA_DIR`) |

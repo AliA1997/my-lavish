@@ -18,6 +18,7 @@ Phases 2-4 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-outp
 - **The server opens in its own window**, with a readable log and a clean shutdown (`MY_LAVISH_SERVER_WINDOW`).
 - **Headless support**: environment detection, tmux, `MY_LAVISH_LAUNCHER`, `MY_LAVISH_TERMINAL`, `MY_LAVISH_ALLOWED_HOSTS`.
 - A poll whose server goes away returns a routine reconnect.
+- **Experimental, off by default:** `USE_ERROR_SEARCH=true` turns on `see-plan errors similar` and `errors store`, using a local vector index that matches shared words, not meaning. `USE_PINECONE=true` with `PINECONE_API_KEY` stores errors in Pinecone instead of the local file, and sends error text off this machine. With neither flag, errors stay in `error-log.json`.
 
 ### Fixes
 - Windows: the server window and Connect Claude never appeared, because `detached` starts a process with no console, and the server's arguments reached Node as one string. Both now open through `Start-Process`.

@@ -1,6 +1,13 @@
 # see-plan: Pinecone replaces the local error log (team-shared errors, session and plan IDs, agent context)
 
-Date: 2026-11-08 · Status: **draft; three choices decided 2026-11-08, Phase 0 spike done 2026-11-08, open questions Q1–Q7 still need answers** · Version at time of writing: 3.3.0, with 4.0.0 (auth token, headless launch) in progress on `feat/trust-headless-paths-multi-output` · Ships as **5.0.0** (breaking: errors are stored in Pinecone, `error-log.json` is no longer written)
+Date: 2026-11-08 · Status: **partly superseded. An opt-in version shipped behind feature flags in 4.0.0; the design below is the original proposal.**
+
+## What actually shipped (differs from this plan)
+
+- **Pinecone is opt-in, not a replacement.** D1 below says Pinecone becomes the only store. The code keeps `error-log.json` as the default and uses Pinecone only with `USE_PINECONE=true` and `PINECONE_API_KEY`. This is not breaking, so there is no 5.0.0.
+- **Search is flagged too.** `see-plan errors similar` and `errors store` need `USE_ERROR_SEARCH=true` (or `USE_PINECONE=true`). Without Pinecone they use a local vector index (`src/vector-cache.js`) that matches shared words, not meaning.
+- **Names differ.** The code uses `PINECONE_INDEX`, `PINECONE_NAMESPACE` and `SEE_PLAN_REPORTER`, and `src/error-store.js` rather than `src/pinecone-error-store.js`.
+- **Not reconciled.** Open questions Q1–Q7 and the task list were not updated task by task, so check the code before relying on any item below.
 
 ## Why this plan exists
 

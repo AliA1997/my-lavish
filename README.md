@@ -57,7 +57,7 @@ node bin/see-plan.js poll examples/plan.html   # in a second terminal: waits for
 node bin/see-plan.js stop                  # when done
 ```
 
-To see your Claude sessions, run `see-plan` with no file in a terminal (or `see-plan logs` from anywhere). The browser opens the **Claude log page** at `http://127.0.0.1:4388/claude`. No plan is shown. The top line is the newest Claude Code session's id and the date of its last prompt, and the page below is that session's log, updating live. **Recent sessions** switches to any of your 20 latest sessions. Click an entry to log it as an error: a dialog shows the entry, asks you to pick a **severity** and *Why is this an error?*, and **Log as error** adds it to `~/claude-errors/error-log.json`. `see-plan error-logs` lists everything logged (see [Error logs](#error-logs)).
+To see your Claude sessions, run `see-plan` with no file in a terminal (or `see-plan logs` from anywhere). The browser opens the **Claude log page** at `http://127.0.0.1:4388/claude`. No plan is shown. The top line is the newest Claude Code session's id and the date of its last prompt, and the page below is that session's log, updating live. **Recent sessions** switches to any of your 20 latest sessions. Click an entry to log it as an error: a dialog shows the entry, asks you to pick a **severity** and *Why is this an error?*, and **Log as error** adds it to the error log (`see-plan paths` shows where). `see-plan error-logs` lists everything logged (see [Error logs](#error-logs)).
 
 To attach a session from the command line instead, pass its id (the file name of a `~/.claude/projects/<project>/<id>.jsonl`):
 
@@ -178,9 +178,33 @@ Every output includes a `next_step` telling the agent what to do next.
 - **Stage menu** in the header labels the session. A label inferred from your words or the file name shows *(inferred) · Confirm*; inference never overrides a label you or the agent set.
 - **Claude log** tab shows that session's transcript (`~/.claude/projects/*/<session-id>.jsonl`, or `$CLAUDE_CONFIG_DIR`). A Claude agent's poll attaches its own session when none is attached yet (it never replaces one you picked); `--claude-session <uuid>` always sets it. Each refresh reads at most 256 KB and the tab keeps the last 500 entries.
 - With no session attached, or one with no transcript (such as a Connect Claude launch that never started), the tab lists the **20 most recent Claude sessions**, newest first. Each is titled by its `/rename` title or first prompt; built-in commands such as `/clear` or `/model` are skipped. Click one to show its log, or paste an id. **Change session** reopens the list.
-- **Click a log entry** to open a small note box: **Send to agent** (a `claude-log` note with your text), **Log as error** (the server appends it to `~/claude-errors/error-log.json` with the severity you pick in the box, and your text saved as the `reason`), or **Both**. *Log as error* and *Both* need a severity; High and Send to IT also need a note. The agent is never asked to write files. A sent entry is marked. Select text inside an entry to copy it instead.
-- **Claude log page** (`/claude`, opened by `see-plan logs`): the newest Claude session's id and last-prompt date on top, its log below, and a **Recent sessions** menu for the other 19. The log loads at least 200 entries when the session has that many (reading up to 16 MB back), then updates live. Add `?id=<uuid>` to the URL to open a given session. No agent is involved here: clicking an entry opens a confirmation dialog with a preview, a required **severity** (keys 1–4 pick one) and a reason (up to 2,000 characters; required for High and Send to IT). **Log as error** (or Ctrl/Cmd+Enter) makes the server append it (session id, line `uuid`, part, role, kind, time, text, `reason`, `severity`, `context`, `review_key`, `stage`, `reported_at`) to `~/claude-errors/error-log.json` itself; Esc cancels. Clicking an entry that is already logged shows its saved reason and severity, read-only: the first ones are kept. Logged entries carry a severity badge. The page header links to the dashboard and the **Error logs** page. It creates the file if missing, keeps the records already there, skips an entry that is already logged, and refuses to touch a file that is not a JSON array.
-- Every local process is trusted: the server has no token, so any process on this machine can attach a session id or trigger a launch. Do not run it on a shared machine.
+- **Click a log entry** to open a small note box: **Send to agent** (a `claude-log` note with your text), **Log as error** (the server appends it to the error log with the severity you pick in the box, and your text saved as the `reason`), or **Both**. *Log as error* and *Both* need a severity; High and Send to IT also need a note. The agent is never asked to write files. A sent entry is marked. Select text inside an entry to copy it instead.
+- **Claude log page** (`/claude`, opened by `see-plan logs`): the newest Claude session's id and last-prompt date on top, its log below, and a **Recent sessions** menu for the other 19. The log loads at least 200 entries when the session has that many (reading up to 16 MB back), then updates live. Add `?id=<uuid>` to the URL to open a given session. No agent is involved here: clicking an entry opens a confirmation dialog with a preview, a required **severity** (keys 1–4 pick one) and a reason (up to 2,000 characters; required for High and Send to IT). **Log as error** (or Ctrl/Cmd+Enter) makes the server append it (session id, line `uuid`, part, role, kind, time, text, `reason`, `severity`, `context`, `review_key`, `stage`, `reported_at`) to the error log itself (`see-plan paths` shows where); Esc cancels. Clicking an entry that is already logged shows its saved reason and severity, read-only: the first ones are kept. Logged entries carry a severity badge. The page header links to the dashboard and the **Error logs** page. It creates the file if missing, keeps the records already there, skips an entry that is already logged, and refuses to touch a file that is not a JSON array.
+- **What the token protects.** The server makes a new secret token at each start and keeps it in a file only your user can read (`server.json` in the runtime folder; see `see-plan paths`). The CLI sends it on every call, and the browser signs in through a one-time link that sets a cookie. Run `see-plan url` to get a link. This stops other OS users on the machine, sandboxed or containerised processes that can reach `127.0.0.1` but can't read your files, and attacks from websites. It does **not** stop malware already running as you: that can read the token file, and everything else you own.
+
+## Several outputs in one review
+
+```
+see-plan open plan.md flow.mmd prototype.html screenshot.png results.csv
+```
+
+The page shows one tab per file, and the first `.html` or `.md` file is the primary. Try it with the files in `examples/multi/`. A review holds up to 12 outputs; add or take them out while it runs with `see-plan add <primary> <file...>` and `see-plan remove <primary> <output-id>`.
+
+| Kind | Files | Notes you can leave |
+| --- | --- | --- |
+| HTML | `.html` `.htm` | Click or select. **Mode: Interact** (Ctrl+I) lets clicks reach the page so prototypes work; Alt-click still takes a note |
+| Markdown | `.md` `.markdown` | Click or select; `mermaid` code blocks are drawn |
+| Mermaid | `.mmd` `.mermaid` | Click a node |
+| Image | `.png` `.jpg` `.gif` `.webp` `.svg` | Click a point or drag a box (percent of the image) |
+| Text | `.txt` `.log` `.json` `.csv` | Click a line, or a row for `.csv` |
+
+Everything renders locally, with no CDN. Files over 5 MB (10 MB for images) show a placeholder. Polling any output waits on the whole review. Each prompt has `output: {id, file, kind}`, and each file live-reloads and keeps its own revisions.
+
+## Starting the server, and running without a desktop
+
+When a command has to start the server, it opens in **its own terminal window** with a live log. Closing that window, pressing Ctrl+C or running `see-plan stop` stops it; the next command starts it again, and queued notes are kept. Inside tmux it opens as a background tmux window. Over SSH, in containers and in CI it runs hidden, logging to `server.log`.
+
+With no desktop, see-plan prints the URL instead of opening a browser: forward the port (`ssh -L 4388:127.0.0.1:4388 <host>`), then run `see-plan url` and open the link. Connect Claude uses a terminal window, then tmux, then shows a command to copy.
 
 ## Error logs
 
@@ -207,6 +231,24 @@ Each error has a severity:
 
 Whether an error is a plan or a session error is worked out by the server when it is logged, from the Claude session id alone. Records logged before severities existed (0.2.x) show as **Unrated**; each can be given a severity once with **Rate…**. *Send to IT* is a label only: nothing is sent anywhere. Records are otherwise never edited.
 
+## Where see-plan keeps its files
+
+see-plan follows each platform's standard folders. `see-plan paths` (or `see-plan paths --json`) prints every path and the rule that chose it (`env`, `legacy` or `default`); agents should read the error log path from there instead of guessing it.
+
+| | Linux / other POSIX | macOS | Windows |
+| --- | --- | --- | --- |
+| state (`state.json`, `revisions/`, `feedback.jsonl`) | `$XDG_STATE_HOME/see-plan` (`~/.local/state/see-plan`) | `~/Library/Application Support/see-plan` | `%LOCALAPPDATA%\see-plan\state` |
+| data (`error-log.json`) | `$XDG_DATA_HOME/see-plan` (`~/.local/share/see-plan`) | `~/Library/Application Support/see-plan` | `%LOCALAPPDATA%\see-plan\data` |
+| logs (`server.log`) | the state dir | `~/Library/Logs/see-plan` | `%LOCALAPPDATA%\see-plan\logs` |
+| runtime (`server.json`) | `$XDG_RUNTIME_DIR/see-plan`, else the state dir | the state dir | `%LOCALAPPDATA%\see-planun` |
+| config (`config.json`, optional) | `$XDG_CONFIG_HOME/see-plan` | `~/Library/Application Support/see-plan` | `%APPDATA%\see-plan` |
+
+On macOS, `XDG_*` variables you set explicitly win over `~/Library`. A relative `XDG_*` value is ignored.
+
+**Upgrading from 3.2 or earlier.** Older versions used `~/.my-lavish-axi` and `~/claude-errors/error-log.json`. While those exist and the new folders don't, see-plan keeps using them, so nothing is lost; bare `see-plan` then prints `legacy_paths: run see-plan migrate`. `see-plan migrate --dry-run` shows what would move; `see-plan migrate` stops the server, copies the data, checks it (the JSON parses, the session and record counts match), and renames the old ones to `*.migrated-<date>`. It never deletes them, and it refuses when the new location already has data.
+
+**Several isolated servers** (for example one per project): give each its own `MY_LAVISH_STATE_DIR` and `MY_LAVISH_PORT`, e.g. `MY_LAVISH_STATE_DIR=~/.see-plan-work MY_LAVISH_PORT=4390 see-plan plan.md`.
+
 ## Environment variables
 
 None are required; the defaults work out of the box. Set them only to change the behavior below.
@@ -214,10 +256,17 @@ None are required; the defaults work out of the box. Set them only to change the
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MY_LAVISH_PORT` | `4388` | Server port |
-| `MY_LAVISH_STATE_DIR` | `~/.my-lavish-axi` | Holds `state.json` and `server.log` |
+| `MY_LAVISH_STATE_DIR` | platform standard; see `see-plan paths` | Holds `state.json`, `revisions/` and `feedback.jsonl`. Setting it also moves `server.log` and the runtime file `server.json` there, so an isolated server never reads another one's token |
+| `MY_LAVISH_DATA_DIR` | platform standard; see `see-plan paths` | Holds `error-log.json` |
+| `MY_LAVISH_SERVER_WINDOW` | `auto` | `auto`, `window`, `tmux` or `hidden`: how a started server is shown |
+| `MY_LAVISH_LAUNCHER` | `auto` | `auto`, `terminal`, `tmux`, `copy` or `off`: how Connect Claude starts Claude |
+| `MY_LAVISH_TERMINAL` | unset | A JSON argv array for your terminal, such as `["wezterm","start","--","{cmd...}"]` |
+| `MY_LAVISH_ALLOWED_HOSTS` | unset | Extra exact host names for a port forwarder. The token is still required |
+| `USE_ERROR_SEARCH` | unset | `true` turns on `see-plan errors similar` and `errors store` (experimental) |
+| `USE_PINECONE` | unset | `true`, with `PINECONE_API_KEY` set, stores errors in Pinecone instead of the local file and turns on error search (experimental). Error text leaves this machine |
 | `MY_LAVISH_NO_OPEN` | unset | `1` = never launch a browser (same as `--no-open`) |
 | `MY_LAVISH_IDLE_TIMEOUT_MS` | `1800000` | Server exits after this long with no WebSocket or poll connections; `0` or `off` disables |
-| `MY_LAVISH_ERROR_LOG` | `~/claude-errors/error-log.json` | Where the server writes logged errors |
+| `MY_LAVISH_ERROR_LOG` | `<data dir>/error-log.json` | Where the server writes logged errors (wins over `MY_LAVISH_DATA_DIR`) |
 
 Example (PowerShell): `$env:MY_LAVISH_PORT = "5000"; see-plan examples/plan.html`
 Example (bash): `MY_LAVISH_PORT=5000 see-plan examples/plan.html`
@@ -227,7 +276,7 @@ Example (bash): `MY_LAVISH_PORT=5000 see-plan examples/plan.html`
 Left out on purpose, to keep only the core loop:
 
 - Tailscale / phone access
-- Excalidraw and Mermaid whiteboards
+- Excalidraw whiteboards (Mermaid diagrams are supported as outputs)
 - Layout-issue audit
 - Image attachments
 - Export and sharing

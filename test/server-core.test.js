@@ -4,9 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { createServer } from "../src/server.js";
+import { authHeaders, createServer, rawFetch } from "./helpers/authed-server.js";
 import { SessionStore } from "../src/session-store.js";
 import { injectSdk } from "../src/html-transform.js";
+import { capFor } from "../src/auth.js";
+import { tokenFor } from "./helpers/authed-server.js";
 
 async function setup(t) {
   const tmp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-srv-"));
@@ -36,7 +38,7 @@ const post = (base, body, headers = {}) =>
 
 function rawGet(port, p, headers = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: "127.0.0.1", port, path: p, headers }, (res) => {
+    const req = http.request({ host: "127.0.0.1", port, path: p, headers: { ...authHeaders(port), ...headers } }, (res) => {
       let body = "";
       res.on("data", (c) => (body += c));
       res.on("end", () => resolve({ status: res.statusCode, body }));
@@ -101,33 +103,39 @@ test("chrome page is framed safely", async (t) => {
   assert.ok(body.includes("Send &amp; End"));
   assert.ok(body.includes('id="sendHint"'));
   assert.ok(/id="endedBanner"[^>]*hidden/.test(body) && body.includes(">Session ended<"));
-  assert.ok(body.includes(`/artifact/${key}/index.html?rev=0`));
+  assert.ok(body.includes(`/artifact/${key}/${capFor(tokenFor(new URL(baseUrl).port), key)}/index.html?rev=0`));
   assert.equal((await fetch(`${baseUrl}/session/0000000000000000`)).status, 404);
 });
 
 test("artifact index.html is original plus sdk tag, sandboxed", async (t) => {
   const { baseUrl, art, html } = await setup(t);
   const { key } = await (await post(baseUrl, { file: path.join(art, "a.html") })).json();
-  const r = await fetch(`${baseUrl}/artifact/${key}/index.html`);
+  const cap = capFor(tokenFor(new URL(baseUrl).port), key);
+  const r = await fetch(`${baseUrl}/artifact/${key}/${cap}/index.html`);
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("content-security-policy"), "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'self'");
-  const asset = await fetch(`${baseUrl}/artifact/${key}/img/x.png`);
+  const asset = await fetch(`${baseUrl}/artifact/${key}/${cap}/img/x.png`);
   assert.match(asset.headers.get("content-security-policy"), /^sandbox allow-scripts allow-forms allow-popups/);
   assert.match(asset.headers.get("content-security-policy"), /frame-ancestors 'self'/);
   assert.equal(await r.text(), injectSdk(html, key, 0));
-  assert.equal((await fetch(`${baseUrl}/artifact/ffffffffffffffff/index.html`)).status, 404);
+  assert.equal((await fetch(`${baseUrl}/artifact/ffffffffffffffff/${cap}/index.html`)).status, 404);
+  assert.equal((await fetch(`${baseUrl}/artifact/${key}/index.html`)).status, 404, "the old URL without a capability is gone (T6)");
+  assert.equal((await rawFetch(`${baseUrl}/artifact/${key}/${"0".repeat(32)}/index.html`)).status, 404, "a wrong capability is 404");
+  assert.equal((await rawFetch(`${baseUrl}/artifact/${key}/${cap}/index.html`)).status, 200, "the capability alone is enough (no cookie in a sandboxed frame)");
 });
 
 test("artifact assets: files served, traversal and directories 404", async (t) => {
   const { baseUrl, art, port } = await setup(t);
   const { key } = await (await post(baseUrl, { file: path.join(art, "a.html") })).json();
-  assert.equal((await fetch(`${baseUrl}/artifact/${key}/img/x.png`)).status, 200);
-  assert.equal((await fetch(`${baseUrl}/artifact/${key}/img`)).status, 404);
-  assert.equal((await fetch(`${baseUrl}/artifact/${key}/nope.png`)).status, 404);
+  const cap = capFor(tokenFor(port), key);
+  assert.equal((await fetch(`${baseUrl}/artifact/${key}/${cap}/img/x.png`)).status, 200);
+  assert.equal((await fetch(`${baseUrl}/artifact/${key}/${cap}/img`)).status, 404);
+  assert.equal((await fetch(`${baseUrl}/artifact/${key}/${cap}/nope.png`)).status, 404);
   for (const p of [
-    `/artifact/${key}/%2e%2e/secret.txt`,
-    `/artifact/${key}/..%2f..%2fsecret.txt`,
-    `/artifact/${key}/..%2fsecret.txt`,
+    `/artifact/${key}/${cap}/%2e%2e/secret.txt`,
+    `/artifact/${key}/${cap}/..%2f..%2fsecret.txt`,
+    `/artifact/${key}/${cap}/..%2fsecret.txt`,
+    `/artifact/${key}/${cap}/%2e%2e/%2e%2e/secret.txt`,
   ]) {
     const r = await rawGet(port, p);
     assert.equal(r.status, 404, p);

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Mutex } from "./async-mutex.js";
 import { htmlPathFor } from "./plan-markdown.js";
+import { MAX_OUTPUTS, outputIdFor, outputsOf } from "./outputs.js";
 import { canRelabel, inferStageFromPath, isStage, isStageSource } from "./stages.js";
 
 const MAX_HISTORY = 10;
@@ -22,6 +23,11 @@ export class StoreError extends Error {
 const now = () => new Date().toISOString();
 
 function anchorFor(p) {
+  const where = baseAnchor(p);
+  return p.output?.id ? `${p.output.id}${where ? `: ${where}` : ""}` : where;
+}
+
+function baseAnchor(p) {
   if (p.tag === "text") return "text selection";
   if (p.tag === "chat") return "";
   if (p.tag === "claude-log") return "Claude log entry";
@@ -34,6 +40,7 @@ function anchorFor(p) {
 function cleanPrompt(p) {
   const out = { prompt_id: p.prompt_id, prompt: p.prompt, tag: p.tag, selector: p.selector, text: p.text };
   if (p.target !== undefined) out.target = p.target;
+  if (p.output !== undefined) out.output = p.output;
   return out;
 }
 
@@ -41,6 +48,14 @@ function cleanPrompt(p) {
 function reopen_(s) {
   s.status = s.prompts.length ? "feedback" : "open";
   delete s.ended_by;
+}
+
+function ownerOf(state, file) {
+  for (const s of Object.values(state.sessions)) {
+    if (s.archived || s.status === "ended") continue;
+    if (s.file === file || outputsOf(s).some((o) => o.file === file || (o.kind === "markdown" && htmlPathFor(o.file) === file))) return s;
+  }
+  return null;
 }
 
 export class SessionStore {
@@ -83,6 +98,11 @@ export class SessionStore {
       if (dirty) await this.#write(state);
       return result;
     });
+  }
+
+  /** Resolves once every transaction queued so far has finished (a clean shutdown waits for it, S5). */
+  drain() {
+    return this.#mutex.runExclusive(async () => {});
   }
 
   /** Runs fn(state) under the store's lock; fn returns [result, dirty]. For modules that keep data in state.json. */
@@ -327,6 +347,57 @@ export class SessionStore {
       delete s.claude_session_id;
       s.updated_at = now();
       return [s, true];
+    });
+  }
+
+  /** The live session that holds `file` as its primary or an added output, or null. Ended and archived ones don't count. */
+  findOutputOwner(file) {
+    return this.#tx(async (state) => [ownerOf(state, file), false]);
+  }
+
+  /**
+   * M1/M2: adds outputs ({file, kind}) to a session. A file already in this session keeps its id; one in another
+   * live session is refused, so one file never has two reviews. Returns { outputs, added }.
+   */
+  addOutputs(key, items) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      const added = [];
+      for (const { file, kind } of items) {
+        const owner = ownerOf(state, file);
+        if (owner && owner.key !== key) throw new StoreError("OUTPUT_IN_OTHER_SESSION", `${file} is already under review in another session`);
+        const all = outputsOf(s);
+        if (s.file === file || all.some((o) => o.file === file)) continue;
+        if (all.length >= MAX_OUTPUTS) throw new StoreError("VALIDATION_ERROR", `A review holds at most ${MAX_OUTPUTS} outputs`);
+        const record = { id: outputIdFor(file, all.map((o) => o.id)), file, kind, revision: 0 };
+        s.outputs = [...(s.outputs ?? []), record];
+        added.push(record);
+      }
+      if (added.length) s.updated_at = now();
+      return [{ outputs: outputsOf(s), added }, added.length > 0];
+    });
+  }
+
+  removeOutput(key, id) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      const removed = (s.outputs ?? []).find((o) => o.id === id);
+      if (!removed) throw new StoreError("MISSING", id === "main" ? "The primary output can't be removed; end the session instead" : `no output ${id}`);
+      s.outputs = s.outputs.filter((o) => o.id !== id);
+      s.updated_at = now();
+      return [{ outputs: outputsOf(s), removed }, true];
+    });
+  }
+
+  /** M5: each added output counts its own revisions. */
+  bumpOutputRevision(key, id) {
+    return this.#tx((state) => {
+      const s = this.#need(state, key);
+      const o = (s.outputs ?? []).find((x) => x.id === id);
+      if (!o) throw new StoreError("MISSING", `no output ${id}`);
+      o.revision = (o.revision ?? 0) + 1;
+      s.updated_at = now();
+      return [o.revision, true];
     });
   }
 

@@ -1,8 +1,40 @@
 # Changelog
 
-## [Unreleased] - planned for 3.3.0
+## [Unreleased] - planned for a later release
 
 The rest of the 2026-11-03 plan (`docs/superpowers/plans/2026-11-03-logs-sessions-plans-fixes.md`, Tasks 2–4): log hand-off, session management and plan management. Its stage inference for plan folders and its Claude-session cache shipped early (0.3.0, and again in 3.2.0).
+
+## [4.0.0] - Unreleased
+
+Phases 2-4 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-output.md`.
+
+### Breaking
+- Every API call, page and WebSocket needs the server's token: 3.x CLIs must be upgraded. Browsers sign in through `see-plan url`.
+- Artifact URLs now carry a capability (`/artifact/<key>/<cap>/…`).
+
+### Added
+- **Several outputs in one review**: `see-plan open a.md b.mmd c.html d.png`, `see-plan add`, `see-plan remove`, tabs, per-output live reload and revisions, and prompts tagged with `output`. New kinds: Mermaid (bundled, no CDN), images, text, JSON and CSV. New `multi` playbook and `examples/multi/`.
+- **Mode: Annotate / Interact**: in Interact, clicks reach the page; Alt-click still takes a note. Remembered per output.
+- **The server opens in its own window**, with a readable log and a clean shutdown (`MY_LAVISH_SERVER_WINDOW`).
+- **Headless support**: environment detection, tmux, `MY_LAVISH_LAUNCHER`, `MY_LAVISH_TERMINAL`, `MY_LAVISH_ALLOWED_HOSTS`.
+- A poll whose server goes away returns a routine reconnect.
+- **Experimental, off by default:** `USE_ERROR_SEARCH=true` turns on `see-plan errors similar` and `errors store`, using a local vector index that matches shared words, not meaning. `USE_PINECONE=true` with `PINECONE_API_KEY` stores errors in Pinecone instead of the local file, and sends error text off this machine. With neither flag, errors stay in `error-log.json`.
+
+### Fixes
+- Windows: the server window and Connect Claude never appeared, because `detached` starts a process with no console, and the server's arguments reached Node as one string. Both now open through `Start-Process`.
+- Windows: writing `server.json` could fail with `EPERM` while a CLI was reading it.
+
+## [3.3.0] - 2026-11-04
+
+Phase 1 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-output.md`: standard state paths. Not breaking: existing installs keep working with no data loss.
+
+### Standard paths
+- New `src/paths.js` owns every see-plan path. State, data (`error-log.json`), logs (`server.log`), the runtime file and the optional `config.json` now follow each platform's standard: XDG on Linux, `~/Library` on macOS (explicit `XDG_*` wins), `%LOCALAPPDATA%` / `%APPDATA%` on Windows.
+- Precedence per path: env override, then the **legacy folder** (`~/.my-lavish-axi`, `~/claude-errors/error-log.json`) while it exists and the new one doesn't, then the platform default.
+- New `MY_LAVISH_DATA_DIR`. `MY_LAVISH_STATE_DIR` now also moves `server.log` and the runtime file.
+- New **`see-plan paths [--json]`**: every path and the rule that chose it. SKILL.md, the poll `next_step`, the `/claude` tip and the panel take the error log path from it instead of a hardcoded `~/claude-errors`.
+- New **`see-plan migrate [--dry-run]`**: stops the server, copies the legacy data, checks it (JSON parses, counts match), and renames the old ones to `*.migrated-<date>`. It never deletes, and refuses when the new location already has data. Bare `see-plan` prints `legacy_paths: run see-plan migrate` while legacy paths are in use.
+- `/health` no longer returns `state_dir`.
 
 ## [3.2.0] - 2026-11-04
 

@@ -23,6 +23,17 @@ const OSA_LINES = (flag, sessionId) => [
   'tell application "Terminal" to activate',
 ];
 
+/**
+ * Args that open `script` in a new visible console. Node's `detached` on Windows means DETACHED_PROCESS, which
+ * has no console at all, so a hidden PowerShell asks Start-Process for one. Both scripts are constants or a
+ * validated UUID; values travel in env vars, which the new window inherits.
+ */
+export function windowsConsoleArgs(script, { noExit = false } = {}) {
+  const inner = `${noExit ? "-NoExit " : ""}-NoLogo -NoProfile -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+  const outer = `Start-Process -FilePath '${POWERSHELL_PATH.replace(/'/g, "''")}' -ArgumentList '${inner}'`;
+  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", Buffer.from(outer, "utf16le").toString("base64")];
+}
+
 function launchError(code, message) {
   const err = new Error(message);
   err.code = code;
@@ -76,7 +87,7 @@ export function buildClaudeLaunch({ file, sessionId, claudePath, env = process.e
   if (platform === "win32") {
     return {
       command: POWERSHELL_PATH,
-      args: ["-NoExit", "-EncodedCommand", Buffer.from(SCRIPT(flag, sessionId), "utf16le").toString("base64")],
+      args: windowsConsoleArgs(SCRIPT(flag, sessionId), { noExit: true }),
       env: { ...env, SEE_PLAN_CLAUDE: claudePath, SEE_PLAN_PROMPT: text },
     };
   }
@@ -139,19 +150,106 @@ export async function findTerminal({ which = (n) => whichOf(n) } = {}) {
   return null;
 }
 
-/** What Connect Claude can do on this machine: powershell | osascript | terminal | copy. */
-export async function claudeStatus({ platform = process.platform, findClaude: find = findClaude, which } = {}) {
+export const LAUNCHERS = ["auto", "terminal", "tmux", "copy", "off"];
+export const CMD_PLACEHOLDER = "{cmd...}";
+const TMUX_SOCKET = /^\/[^\0\n]{1,200}$/;
+
+/**
+ * A custom terminal (MY_LAVISH_TERMINAL / config.json `terminal`, H3): a JSON argv array of strings with
+ * exactly one "{cmd...}" placeholder, e.g. ["wezterm","start","--","{cmd...}"]. Never a shell string.
+ * Returns the array, null when unset, or throws VALIDATION_ERROR.
+ */
+export function parseTerminalArgv(value) {
+  if (value === undefined || value === null || value === "") return null;
+  let argv = value;
+  if (typeof value === "string") {
+    try {
+      argv = JSON.parse(value);
+    } catch {
+      throw launchError("VALIDATION_ERROR", "MY_LAVISH_TERMINAL must be a JSON array of strings, like [\"wezterm\",\"start\",\"--\",\"{cmd...}\"]");
+    }
+  }
+  if (!Array.isArray(argv) || argv.length < 2 || !argv.every((a) => typeof a === "string" && a !== "" && !a.includes("\0"))) {
+    throw launchError("VALIDATION_ERROR", "MY_LAVISH_TERMINAL must be a JSON array of at least two non-empty strings");
+  }
+  if (argv.filter((a) => a === CMD_PLACEHOLDER).length !== 1) {
+    throw launchError("VALIDATION_ERROR", `MY_LAVISH_TERMINAL must contain "${CMD_PLACEHOLDER}" exactly once`);
+  }
+  if (argv[0] === CMD_PLACEHOLDER) throw launchError("VALIDATION_ERROR", "MY_LAVISH_TERMINAL must start with the terminal program");
+  return argv;
+}
+
+/** Expands a custom terminal template: the placeholder becomes the command's argv items, in place. */
+export function expandTerminal(template, cmdArgv) {
+  return template.flatMap((a) => (a === CMD_PLACEHOLDER ? cmdArgv : [a]));
+}
+
+/** The launcher settings: env first (MY_LAVISH_LAUNCHER, MY_LAVISH_TERMINAL), then config.json. */
+export function launcherSettings(env = process.env, config = {}) {
+  const raw = env.MY_LAVISH_LAUNCHER || config.launcher || "auto";
+  const launcher = LAUNCHERS.includes(raw) ? raw : "auto";
+  let terminal = null;
+  let terminalError = null;
+  try {
+    terminal = parseTerminalArgv(env.MY_LAVISH_TERMINAL || config.terminal);
+  } catch (e) {
+    terminalError = e.message;
+  }
+  return { launcher, terminal, terminalError, ...(launcher !== raw ? { launcherError: `unknown launcher "${raw}"` } : {}) };
+}
+
+/**
+ * Picks the launch strategy (H3): the first that applies wins. `terminal` on a desktop, `tmux` inside tmux
+ * (or when chosen), else `copy`. MY_LAVISH_LAUNCHER forces one; `off` hides Connect Claude.
+ * Returns { strategy, reasons[] }.
+ */
+export function chooseStrategy(environment, settings = {}) {
+  const env = environment ?? { gui: true, tmux: false, reasons: [] };
+  const reasons = [...(env.reasons ?? [])];
+  const launcher = LAUNCHERS.includes(settings.launcher) ? settings.launcher : "auto";
+  if (settings.launcherError) reasons.push(settings.launcherError);
+  if (launcher !== "auto") return { strategy: launcher, reasons: [`MY_LAVISH_LAUNCHER=${launcher}`, ...reasons] };
+  if (env.gui) return { strategy: "terminal", reasons };
+  if (env.tmux) return { strategy: "tmux", reasons };
+  return { strategy: "copy", reasons };
+}
+
+/** A tmux window name: letters, digits, dot, dash and underscore only. */
+export function tmuxName(name) {
+  return `see-plan-${String(name || "review").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 40)}`;
+}
+
+/**
+ * `tmux new-window -d -n <name> -c <cwd> -- <argv...>` (argv only, never a shell string). Without a tmux
+ * session to target, a detached `new-session -s see-plan` instead. `socket` is the CLI's tmux server (H2).
+ */
+export function buildTmuxLaunch({ argv, name, cwd, socket = null, inTmux = true }) {
+  const target = socket && TMUX_SOCKET.test(socket) ? ["-S", socket] : [];
+  const window = tmuxName(name);
+  const args = inTmux
+    ? [...target, "new-window", "-d", "-n", window, "-c", cwd, "--", ...argv]
+    : [...target, "new-session", "-d", "-s", "see-plan", "-n", window, "-c", cwd, "--", ...argv];
+  return { command: "tmux", args, window };
+}
+
+/** What Connect Claude can do here: launch (powershell | osascript | terminal | tmux | copy | off), strategy and why. */
+export async function claudeStatus({ platform = process.platform, findClaude: find = findClaude, which, environment = null, settings = {} } = {}) {
   let claudePath = null;
   try {
     claudePath = await find({ platform });
   } catch {
     claudePath = null;
   }
-  let launch = "copy";
-  if (platform === "win32") launch = "powershell";
-  else if (platform === "darwin") launch = "osascript";
-  else if (await findTerminal(which ? { which } : {})) launch = "terminal";
-  return { platform, launch, claude_found: Boolean(claudePath), claude_path: claudePath };
+  const { strategy, reasons } = chooseStrategy(environment, settings);
+  let launch = strategy;
+  if (strategy === "terminal") {
+    if (platform === "win32") launch = "powershell";
+    else if (platform === "darwin") launch = "osascript";
+    else if (!settings.terminal && !(await findTerminal(which ? { which } : {}))) launch = "copy";
+  }
+  const out = { platform, launch, claude_found: Boolean(claudePath), claude_path: claudePath, strategy, strategy_reasons: reasons };
+  if (launch === "copy" && strategy === "terminal") out.strategy_reasons = [...reasons, "no terminal program was found (x-terminal-emulator, gnome-terminal, konsole, xterm)"];
+  return out;
 }
 
 /** Nearest ancestor holding a .git entry, or `dir`. Spawns nothing. */
@@ -166,27 +264,69 @@ export async function findRepoRoot(dir) {
 }
 
 /**
- * Opens a terminal running Claude for `file`. Returns { mode, command? }: mode is the launch kind,
- * or "copy" with a command for the user to paste when no terminal can be opened.
+ * Starts Claude for `file` with the chosen strategy (H3). Returns { mode, strategy, strategy_reasons,
+ * command?, tmux_window? }: mode is the launch kind (powershell | osascript | terminal | tmux | copy),
+ * and "copy" carries a command for the user to paste.
  */
 export async function launchClaude(
-  { file, cwd, sessionId, resume = false, prompt },
+  { file, cwd, sessionId, resume = false, prompt, feature, environment = null, config = {} },
   { spawnFn = spawn, platform = process.platform, findClaude: find = findClaude, which } = {},
 ) {
   if (!["win32", "darwin", "linux"].includes(platform)) {
     throw launchError("UNSUPPORTED_PLATFORM", `Connect Claude does not support ${platform}`);
   }
+  const { strategy, reasons } = chooseStrategy(environment, config);
+  if (strategy === "off") throw launchError("LAUNCHER_OFF", "Connect Claude is turned off (MY_LAVISH_LAUNCHER=off)");
   const claudePath = await find({ platform });
   if (!claudePath) throw launchError("CLAUDE_NOT_FOUND", "Could not find `claude` on PATH. Install Claude Code first.");
   const text = prompt ?? buildPrompt({ file });
   const flag = resume ? "--resume" : "--session-id";
-  const terminal = platform === "linux" ? await findTerminal(which ? { which } : {}) : undefined;
-  const built = buildClaudeLaunch({ file, sessionId, claudePath, platform, resume, cwd, terminal, prompt: text });
-  if (built.copy) {
-    return { mode: "copy", command: copyCommand({ platform, cwd, claudePath, flag, sessionId, prompt: text }) };
+  if (!isClaudeSessionId(sessionId)) throw launchError("VALIDATION_ERROR", "Invalid Claude session id");
+  const copy = (why) => ({
+    mode: "copy", strategy: "copy", strategy_reasons: why ? [...reasons, why] : reasons,
+    command: copyCommand({ platform, cwd, claudePath, flag, sessionId, prompt: text }),
+  });
+  if (strategy === "copy") return copy();
+  if (strategy === "tmux") {
+    const t = buildTmuxLaunch({ argv: [claudePath, flag, sessionId, text], name: feature || launchLabel({ file }).split(" · ")[1], cwd, socket: environment?.tmux_socket ?? null, inTmux: Boolean(environment?.tmux) });
+    const ok = await spawnChecked(spawnFn, t.command, t.args, { cwd, env: { ...process.env }, detached: true, stdio: "ignore" });
+    if (!ok.spawned) return copy(`tmux could not start: ${ok.reason}`);
+    return { mode: "tmux", strategy: "tmux", strategy_reasons: reasons, tmux_window: t.window };
   }
-  const child = spawnFn(built.command, built.args, { cwd, env: built.env, detached: true, stdio: "ignore" });
+  // terminal
+  let built;
+  if (platform === "linux" && config.terminal) {
+    built = { command: config.terminal[0], args: expandTerminal(config.terminal, [claudePath, flag, sessionId, text]).slice(1), env: { ...process.env } };
+  } else {
+    const terminal = platform === "linux" ? (process.env.TERMINAL && !/[\s;&|]/.test(process.env.TERMINAL) ? await (which ?? whichOf)(process.env.TERMINAL) : null) ?? await findTerminal(which ? { which } : {}) : undefined;
+    built = buildClaudeLaunch({ file, sessionId, claudePath, platform, resume, cwd, terminal, prompt: text });
+    if (built.copy) return copy("no terminal program was found");
+  }
+  const child = spawnFn(built.command, built.args, { cwd, env: built.env, stdio: "ignore", ...(platform === "win32" ? { windowsHide: true } : { detached: true }) });
   child.on?.("error", () => {});
   child.unref?.();
-  return { mode: platform === "win32" ? "powershell" : platform === "darwin" ? "osascript" : "terminal" };
+  return { mode: platform === "win32" ? "powershell" : platform === "darwin" ? "osascript" : "terminal", strategy: "terminal", strategy_reasons: reasons };
+}
+
+/** Spawns and waits for "spawn" or "error": { spawned: true } or { spawned: false, reason }. */
+export function spawnChecked(spawnFn, command, args, options) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawnFn(command, args, options);
+    } catch (e) {
+      resolve({ spawned: false, reason: e.message });
+      return;
+    }
+    if (typeof child?.once !== "function") {
+      child?.unref?.();
+      resolve({ spawned: true, child });
+      return;
+    }
+    child.once("error", (e) => resolve({ spawned: false, reason: e.code === "ENOENT" ? `${path.basename(command)} is not installed` : e.message }));
+    child.once("spawn", () => {
+      child.unref?.();
+      resolve({ spawned: true, child });
+    });
+  });
 }

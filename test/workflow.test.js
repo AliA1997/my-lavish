@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
-import { createServer } from "../src/server.js";
+import { authHeaders, createServer, rawFetch } from "./helpers/authed-server.js";
 import { SessionStore } from "../src/session-store.js";
 import { readFeedback } from "../src/feedback-log.js";
 import { createPollOutput } from "../src/cli.js";
@@ -52,7 +52,7 @@ async function setup(t, opts = {}) {
 
 function ws(port, p) {
   return new Promise((resolve, reject) => {
-    const sock = new WebSocket(`ws://127.0.0.1:${port}${p}`);
+    const sock = new WebSocket(`ws://127.0.0.1:${port}${p}`, { headers: authHeaders(port) });
     const messages = [];
     sock.on("message", (d) => messages.push(JSON.parse(String(d))));
     const waitFor = async (pred, ms = 3000) => {

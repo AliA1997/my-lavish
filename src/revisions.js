@@ -45,3 +45,41 @@ export async function readRevision(stateDir, key, n) {
   if (!Number.isInteger(n) || n < 0) return null;
   return fs.promises.readFile(path.join(dirOf(stateDir, key), `${n}.html`), "utf8").catch(() => null);
 }
+
+// ---- M5: added outputs keep their revisions in revisions/<key>/<output-id>/<n><ext> ----
+
+function outputDir(stateDir, key, id) {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) throw new Error("invalid output id");
+  return path.join(dirOf(stateDir, key), id);
+}
+
+async function outputFiles(dir) {
+  const names = await fs.promises.readdir(dir).catch(() => []);
+  return names.map((name) => ({ name, m: /^(\d+)(\.[^.]+)$/.exec(name) })).filter((x) => x.m).map((x) => ({ name: x.name, n: Number(x.m[1]) })).sort((a, b) => a.n - b.n);
+}
+
+export async function saveOutputRevision(stateDir, key, id, n, file) {
+  const dir = outputDir(stateDir, key, id);
+  await fs.promises.mkdir(dir, { recursive: true });
+  await fs.promises.copyFile(file, path.join(dir, `${n}${path.extname(file).toLowerCase()}`));
+  const all = await outputFiles(dir);
+  for (const old of all.slice(0, Math.max(0, all.length - MAX_REVISIONS))) await fs.promises.rm(path.join(dir, old.name), { force: true });
+}
+
+export async function listOutputRevisions(stateDir, key, id) {
+  const dir = outputDir(stateDir, key, id);
+  const out = [];
+  for (const f of await outputFiles(dir)) {
+    const st = await fs.promises.stat(path.join(dir, f.name)).catch(() => null);
+    if (st) out.push({ n: f.n, at: st.mtime.toISOString(), bytes: st.size });
+  }
+  return out;
+}
+
+/** The revision's bytes, or null. */
+export async function readOutputRevision(stateDir, key, id, n) {
+  if (!Number.isInteger(n) || n < 0) return null;
+  const dir = outputDir(stateDir, key, id);
+  const f = (await outputFiles(dir)).find((x) => x.n === n);
+  return f ? fs.promises.readFile(path.join(dir, f.name)).catch(() => null) : null;
+}

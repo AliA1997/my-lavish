@@ -1,3 +1,4 @@
+import { outputsOf } from "./outputs.js";
 import fs from "node:fs";
 import { escapeHtml, serializeChat } from "./markdown.js";
 import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES } from "./stages.js";
@@ -29,7 +30,7 @@ function workflowView(wf, baseUrl) {
   return { id: wf.id, name: wf.name, current: wf.current, stages };
 }
 
-export function createChromeHtml(session, { baseUrl, canResume = false, workflow = null } = {}) {
+export function createChromeHtml(session, { baseUrl, canResume = false, workflow = null, errorLogFile = "the error log", artifactBase = `/artifact/${session.key}` } = {}) {
   const file = session.source_file ?? session.file;
   const data = {
     key: session.key,
@@ -47,10 +48,12 @@ export function createChromeHtml(session, { baseUrl, canResume = false, workflow
     poll_command: `see-plan poll ${quoteArg(file)}${session.stage ? ` --stage ${session.stage}` : ""}`,
     history: (session.history ?? []).map((h) => ({ ended_at: h.ended_at ?? null, ended_by: h.ended_by ?? null, chat: serializeChat(h.chat ?? []) })),
     workflow: workflowView(workflow, baseUrl ?? ""),
+    artifact_base: artifactBase,
+    outputs: outputsOf(session).map((o) => ({ id: o.id, file: o.file, kind: o.kind, revision: o.revision ?? 0 })),
   };
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
   const title = escapeHtml(artifactTitle(session));
-  const src = `/artifact/${encodeURIComponent(session.key)}/index.html?rev=${session.revision}`;
+  const src = `${artifactBase}/index.html?rev=${session.revision}`;
   const stageOptions = STAGES.map((s) => `<option value="${s}">${STAGE_TITLES[s]}</option>`).join("");
   const chips = SESSION_FEEDBACK_CATEGORIES.map(
     (c) => `<label class="chip"><input type="checkbox" name="category" value="${c}"> ${escapeHtml(CATEGORY_TITLES[c])}</label>`,
@@ -63,10 +66,11 @@ export function createChromeHtml(session, { baseUrl, canResume = false, workflow
 <title>${title}</title>
 <link rel="stylesheet" href="/chrome.css">
 </head>
-<body data-base-url="${escapeHtml(baseUrl ?? "")}">
+<body data-base-url="${escapeHtml(baseUrl ?? "")}" data-error-log="${escapeHtml(errorLogFile)}">
 <div id="app">
   <main id="stage">
     <div id="revisionBar" role="status" hidden><span id="revisionBarText"></span> <button id="backToLatest" type="button">Back to latest</button></div>
+    <div id="outputTabs" role="tablist" aria-label="Outputs in this review" hidden></div>
     <iframe id="artifact" title="Artifact under review" sandbox="allow-scripts allow-forms allow-popups" src="${src}"></iframe>
   </main>
   <aside id="panel" aria-label="Review panel">

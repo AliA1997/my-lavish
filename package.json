@@ -1,6 +1,6 @@
 {
   "name": "my-lavish-axi",
-  "version": "3.2.0",
+  "version": "4.0.0",
   "description": "Review an agent's plans as live, annotatable pages, and run features through Plan, Interrogation, Implementation and Verification stages with Claude.",
   "license": "MIT",
   "author": "AliA1997",
@@ -37,6 +37,7 @@
     "licenses": "node scripts/third-party-licenses.js"
   },
   "dependencies": {
+    "@pinecone-database/pinecone": "9.2.0",
     "chokidar": "^4.0.3",
     "express": "^5.3.0",
     "marked": "^15.0.12",
@@ -44,6 +45,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.11",
+    "mermaid": "11.17.2",
     "postject": "^1.0.0-alpha.6"
   }
 }

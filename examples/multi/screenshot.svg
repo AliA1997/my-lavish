@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <rect width="640" height="360" fill="#f4f5f6"/>
+  <rect x="40" y="40" width="560" height="60" rx="8" fill="#fff" stroke="#c8ccd0"/>
+  <text x="60" y="78" font-family="sans-serif" font-size="20">Current checkout: step 1 of 3</text>
+  <rect x="40" y="120" width="560" height="160" rx="8" fill="#fff" stroke="#c8ccd0"/>
+  <text x="60" y="160" font-family="sans-serif" font-size="16">Address form</text>
+  <rect x="440" y="295" width="160" height="44" rx="8" fill="#1a7f37"/>
+  <text x="490" y="323" font-family="sans-serif" font-size="16" fill="#fff">Continue</text>
+</svg>

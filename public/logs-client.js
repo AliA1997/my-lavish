@@ -2,7 +2,7 @@
 (function () {
   "use strict";
 
-  var ERROR_LOG = "~/claude-errors/error-log.json";
+  var ERROR_LOG = (document.body && document.body.getAttribute("data-error-log")) || "the error log"; // the real path, from the server (see-plan paths)
   var POLL_MS = 2000;
   var LIST_MS = 30000;
   var MAX_ENTRIES = 1000;

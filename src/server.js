@@ -10,25 +10,31 @@ import { assertHtmlFile, canonicalFile, resolveArtifactAsset } from "./artifact-
 import { injectSdk } from "./html-transform.js";
 import { createChromeHtml } from "./chrome-page.js";
 import { createLogsHtml } from "./logs-page.js";
-import { appendErrorLog, ErrorLogError, errorLogSize, getErrorRecord, listErrorRecords, rateErrorRecord, reportedRecords, summarizeErrorRecords } from "./error-log.js";
+import { ErrorLogError } from "./error-log.js";
+import { LocalErrorStore } from "./error-store.js";
 import { createErrorsHtml } from "./errors-page.js";
 import { isSeverity, needsReason, SEVERITIES } from "./severity.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
-import { ensurePlanHtml, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
+import { ensurePlanHtml, htmlPathFor, isMarkdownPath, renderPlanHtml } from "./plan-markdown.js";
 import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, effectiveStage, inferStageFromText, isStage, nextStage, stageInstructions } from "./stages.js";
-import { listRevisions, readRevision, saveRevision } from "./revisions.js";
+import { listOutputRevisions, listRevisions, readOutputRevision, readRevision, saveOutputRevision, saveRevision } from "./revisions.js";
+import { getOutput, imageType, kindOf, maxBytesFor, outputsOf, placeholderPage, promptOutput, renderOutputPage, withMermaid } from "./outputs.js";
 import { appendFeedback } from "./feedback-log.js";
 import {
   advanceWorkflow, createWorkflow, ensureStageFile, getWorkflow, isFeatureName, listWorkflows, reopenStage,
   requirementsFile, stageFile, updateStage,
 } from "./workflow-store.js";
 import { createHomeHtml } from "./home-page.js";
+import { resolvePaths } from "./paths.js";
 import { findProjectRoot, isPlanFileName, listSuperpowersPlans } from "./project.js";
 import { getProject, isProjectKey, listProjects, registerProject } from "./project-store.js";
 import { CONTENT_TYPES, PUBLIC_ASSETS, readAsset } from "./assets.js";
 import { createClaudeSessionLister, findLastPromptAt, findTranscript, readTranscript } from "./claude-log.js";
 import { buildPrompt, claudeStatus as realClaudeStatus, findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
+import { bearerOf, capFor, cookieNameFor, cookieValueFor, createNonceStore, createToken, parseCookies, safeEqual, safeNext } from "./auth.js";
+import { scheduleIdleWarnings } from "./console-log.js";
+import { detectEnvironment, parseEnvHeader } from "./environment.js";
 
 export { PUBLIC_ASSETS };
 const ALLOWED_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -36,8 +42,8 @@ const PING_INTERVAL_MS = 30000;
 const CONNECT_COOLDOWN_MS = 60000;
 export const AGENT_POLL_MS = 110000; // under Claude Code's default 120 s Bash timeout
 const PRESENCE_GRACE_MS = 20000; // a re-poll within this window is invisible to the user
-const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424 };
-const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409, UNSENT_NOTES: 409, NOT_CURRENT: 409 };
+const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424, LAUNCHER_OFF: 409 };
+const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409, UNSENT_NOTES: 409, NOT_CURRENT: 409, OUTPUT_IN_OTHER_SESSION: 409 };
 const MAX_FEEDBACK_TEXT = 4000;
 const LOG_ROLES = new Set(["user", "assistant"]);
 const LOG_KINDS = new Set(["text", "tool_use", "tool_result"]);
@@ -50,6 +56,7 @@ const PAGE_MIN_ENTRIES = 200; // ...until it holds this many entries (screenshot
 const ERROR_CONTEXTS = ["session", "plan"];
 const SEVERITY_FILTERS = [...SEVERITIES, "unrated"];
 const ERROR_PREVIEW_CHARS = 500;
+const MAX_SIMILAR_QUERY = 4000;
 const ERROR_LOG_STATUS = { MISSING: 404, ALREADY_RATED: 409, VALIDATION_ERROR: 400, ERROR_LOG_UNREADABLE: 409 };
 
 /** limit/offset: rounded down, clamped to [min, max]; the default when missing or not a number. */
@@ -91,7 +98,8 @@ function originOf(value) {
 /** True only when an Origin header is present and equals http://<Host>. */
 export function requireSameOrigin(req) {
   const origin = req.headers.origin;
-  return typeof origin === "string" && origin === `http://${req.headers.host}`;
+  if (typeof origin !== "string") return false;
+  return origin === `http://${req.headers.host}` || (req.seePlanForwarded === true && origin === `https://${req.headers.host}`);
 }
 
 function errorBody(code, message) {
@@ -108,7 +116,9 @@ function isCrossSite(req) {
   const site = req.headers["sec-fetch-site"];
   if (site !== undefined && site !== "same-origin" && site !== "none") return true;
   const source = req.headers.origin ?? req.headers.referer;
-  return source !== undefined && originOf(source) !== `http://${req.headers.host}`;
+  if (source === undefined) return false;
+  const o = originOf(source);
+  return o !== `http://${req.headers.host}` && !(req.seePlanForwarded === true && o === `https://${req.headers.host}`);
 }
 
 const MAX_TIMER_MS = 2147483647;
@@ -132,13 +142,34 @@ export function createServer({
   launchClaude = realLaunchClaude,
   claudeStatus = realClaudeStatus,
   claudeDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"),
-  errorLogFile = path.join(os.homedir(), "claude-errors", "error-log.json"),
+  errorLogFile = resolvePaths().errorLogFile,
+  errorSearch = false, // the USE_ERROR_SEARCH feature flag: /api/errors/similar and /api/errors/store answer 404 while off
+  errorStore = null, // src/error-store.js: Pinecone when USE_PINECONE=true and a key is set (cmdServer decides); else the file
+  logDir = null, // shown in the console banner; server.log itself is opened by whoever starts the server
   agentPollMs = AGENT_POLL_MS,
   presenceGraceMs = PRESENCE_GRACE_MS,
   connectCooldownMs = CONNECT_COOLDOWN_MS,
   claudeSessionTtlMs = 30000,
   projectHome = os.homedir(), // D9: never a project root (tests point it elsewhere)
+  token = createToken(), // T2: every API call, page and WebSocket needs it (bearer or cookie); there is no off switch
+  allowedHosts = [], // H5: extra exact Host names (port forwarders); only ever added on top of the token check
+  nonceTtlMs = 60000,
+  launcherConfig = {}, // H3: { launcher, terminal } from MY_LAVISH_LAUNCHER / MY_LAVISH_TERMINAL / config.json
+  idleWarnings = false, // S4: log the idle countdown at 5 min and 1 min (the server window shows it)
 }) {
+  let cancelIdleWarnings = null;
+  const errors = errorStore ?? new LocalErrorStore(errorLogFile);
+  const errorLogLabel = errors.label; // what the pages and the API name as "the error log"
+  const clientEnvs = new Map(); // key -> the newest caller's environment (H2), in memory only
+  /** H2: keeps the newest valid X-See-Plan-Env per session (size-capped and schema-checked; never in state.json). */
+  function rememberEnv(key, req) {
+    const env = parseEnvHeader(req.headers["x-see-plan-env"]);
+    if (env) clientEnvs.set(key, env);
+  }
+  /** The environment Connect Claude should use: the session's newest caller, else the server's own. */
+  const environmentFor = (key) => clientEnvs.get(key) ?? detectEnvironment();
+  // Log lines name a session by its file name and count notes; note and transcript text are never logged (S4).
+  const titleOf = (s) => path.basename(s?.source_file ?? s?.file ?? "session");
   const claudeSessions = createClaudeSessionLister({ ttlMs: claudeSessionTtlMs });
   const app = express();
   const events = new EventEmitter();
@@ -280,7 +311,7 @@ export function createServer({
 
   async function errorSummary(lookup) {
     try {
-      return await summarizeErrorRecords(errorLogFile, lookup.byClaude);
+      return await errors.summarize(lookup.byClaude);
     } catch (e) {
       if (!(e instanceof ErrorLogError)) throw e;
       return { counts: null, bySession: new Map(), byReview: new Map(), unreadable: e.message };
@@ -322,23 +353,27 @@ export function createServer({
     let connected = activePolls.size + homeSockets.size;
     for (const set of sockets.values()) connected += set.size;
     if (connected > 0) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
+      clearIdle();
     } else if (!idleTimer) {
       idleTimer = setTimeout(() => {
         log(`idle for ${idleTimeoutMs} ms, shutting down`);
-        close().then(() => {
-          if (exitOnIdle) process.exit(0);
-        });
+        shutdown("idle"); // the server process exits once "closed" is emitted (cmdServer)
       }, idleTimeoutMs);
       idleTimer.unref();
+      if (idleWarnings) cancelIdleWarnings = scheduleIdleWarnings(idleTimeoutMs, log);
     }
+  }
+
+  function clearIdle() {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+    cancelIdleWarnings?.();
+    cancelIdleWarnings = null;
   }
 
   // The log page polls over plain HTTP: each read restarts the idle countdown.
   function touchIdle() {
-    clearTimeout(idleTimer);
-    idleTimer = null;
+    clearIdle();
     updateIdle();
   }
 
@@ -364,7 +399,7 @@ export function createServer({
       onError: (e) => log(`watcher error for ${key}: ${e?.message ?? e}`),
     });
     watchers.set(key, watcher);
-    const ready = [watcher.ready];
+    const ready = [watcher.ready, ...(session.outputs ?? []).map((o) => watchOutput(key, o))];
     // A Markdown plan: editing the .md regenerates the html, which the watcher above then reloads.
     if (session.source_file && htmlPathFor(session.source_file) === session.file) {
       const md = watchArtifact(session.source_file, {
@@ -380,21 +415,89 @@ export function createServer({
     return Promise.all(ready);
   }
 
+  // M5: one watcher per added output. A Markdown output regenerates its html first.
+  function watchOutput(key, output) {
+    const name = `${key}:o:${output.id}`;
+    if (closing || watchers.has(name)) return Promise.resolve();
+    const watcher = watchArtifact(output.file, {
+      onChange: () => {
+        if (closing) return;
+        track((async () => {
+          if (output.kind === "markdown") await ensurePlanHtml(output.file);
+          const revision = await store.bumpOutputRevision(key, output.id);
+          await saveOutputRevision(stateDir, key, output.id, revision, output.file);
+          broadcast(key, { type: "reload", output: output.id, revision });
+        })().catch((e) => log(`output update failed for ${name}: ${e?.message ?? e}`)));
+      },
+      onError: (e) => log(`watcher error for ${name}: ${e?.message ?? e}`),
+    });
+    watchers.set(name, watcher);
+    return watcher.ready;
+  }
+
+  const outputsView = (session) => outputsOf(session).map((o) => ({ id: o.id, file: o.file, kind: o.kind, revision: o.revision ?? 0 }));
+
   app.disable("x-powered-by");
+
+  // H5: hosts a port forwarder uses (Codespaces, VS Code). Exact names only; the token check below always runs.
+  const extraHosts = new Set(allowedHosts.map((h) => String(h).trim().toLowerCase()).filter(Boolean));
+  const hostAllowed = (hostHeader) => {
+    const name = hostnameOf(hostHeader);
+    return ALLOWED_HOSTNAMES.has(name) || extraHosts.has(name);
+  };
+  const sameOriginSource = (req, source) => {
+    const o = originOf(source);
+    return o === `http://${req.headers.host}` || (extraHosts.has(hostnameOf(req.headers.host)) && o === `https://${req.headers.host}`);
+  };
+
+  // ---- T5: the token (bearer for the CLI, cookie for the browser) ----
+  const nonces = createNonceStore({ ttlMs: nonceTtlMs });
+  const cookieValue = cookieValueFor(token);
+  let boundPort = port;
+  const cookieName = () => cookieNameFor(boundPort);
+  const hasBearer = (req) => safeEqual(bearerOf(req.headers.authorization) ?? "", token);
+  const hasCookie = (req) => safeEqual(parseCookies(req.headers.cookie).get(cookieName()) ?? "", cookieValue);
+  const authed = (req) => hasBearer(req) || hasCookie(req);
+  const publicPaths = new Set(PUBLIC_ASSETS.map((n) => `/${n}`));
+  /** Open without a token: health, the login link, static files, and artifact frames (they carry a capability, T6). */
+  function authExempt(req) {
+    if (req.method !== "GET" && req.method !== "HEAD") return false;
+    return req.path === "/health" || req.path === "/auth" || publicPaths.has(req.path) || req.path.startsWith("/artifact/");
+  }
+  const AUTH_MESSAGE = "This see-plan server needs its token. A 3.x see-plan cannot talk to it: upgrade see-plan. In a browser, run `see-plan url` in a terminal to get a sign-in link.";
+
+  function unauthorizedPage() {
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in to see-plan</title>
+<style>:root{color-scheme:light dark}body{font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;max-width:36rem;margin:15vh auto;padding:0 16px}code{background:rgba(127,127,127,.15);padding:2px 6px;border-radius:4px}</style></head>
+<body><h1>Sign in to see-plan</h1><p>Run <code>see-plan url</code> in a terminal to get a sign-in link, then open it here.</p>
+<p>A link works once and expires after a minute. Opening a review with <code>see-plan &lt;file&gt;</code> signs you in too.</p></body></html>`;
+  }
 
   // Host allowlist: blocks DNS rebinding.
   app.use((req, res, next) => {
-    if (!ALLOWED_HOSTNAMES.has(hostnameOf(req.headers.host))) {
+    if (!hostAllowed(req.headers.host)) {
       return res.status(403).json(errorBody("FORBIDDEN_HOST", "Host not allowed"));
     }
+    if (extraHosts.has(hostnameOf(req.headers.host))) req.seePlanForwarded = true; // X-Forwarded-Proto is trusted only here
     next();
+  });
+
+  // Token check, right after the Host allowlist. The Origin checks below stay as defence in depth.
+  app.use((req, res, next) => {
+    if (authExempt(req) || authed(req)) return next();
+    const page = req.method === "GET" && !req.path.startsWith("/api/");
+    if (page) {
+      res.set("Cache-Control", "no-store");
+      return res.status(401).type("html").send(unauthorizedPage());
+    }
+    res.status(401).json(errorBody("AUTH_REQUIRED", AUTH_MESSAGE));
   });
 
   // Origin guard: blocks cross-site writes. Header-less (CLI) requests pass.
   app.use((req, res, next) => {
     if (req.method === "GET" || req.method === "HEAD") return next();
     const source = req.headers.origin ?? req.headers.referer;
-    if (source !== undefined && originOf(source) !== `http://${req.headers.host}`) {
+    if (source !== undefined && !sameOriginSource(req, source)) {
       return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
     }
     next();
@@ -403,12 +506,30 @@ export function createServer({
   app.use(express.json({ limit: "5mb" }));
 
   app.get("/health", (req, res) => {
-    res.json({ ok: true, app: "my-lavish-axi", version, state_dir: stateDir });
+    res.json({ ok: true, app: "my-lavish-axi", version, auth: "token" });
+  });
+
+  // T4: the CLI (bearer only, not a cookie) asks for a single-use, 60 s login nonce...
+  app.post("/api/auth/nonce", (req, res) => {
+    if (!hasBearer(req)) return res.status(401).json(errorBody("AUTH_REQUIRED", "Sign-in links are made by the see-plan CLI"));
+    res.json({ nonce: nonces.issue(), expires_in_ms: nonceTtlMs });
+  });
+
+  // ...and the browser trades it for the cookie, then lands on `next` (a same-origin path only).
+  app.get("/auth", (req, res) => {
+    const next = safeNext(req.query.next);
+    if (next === null) return res.status(400).json(errorBody("VALIDATION_ERROR", "next must be a same-origin path"));
+    res.set("Cache-Control", "no-store");
+    res.set("Referrer-Policy", "no-referrer");
+    if (!nonces.consume(req.query.t)) return res.status(401).type("html").send(unauthorizedPage());
+    const https = req.seePlanForwarded === true && String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https";
+    res.set("Set-Cookie", `${cookieName()}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/${https ? "; Secure" : ""}`);
+    res.redirect(303, next);
   });
 
   app.post("/shutdown", (req, res) => {
     res.json({ ok: true });
-    res.on("finish", () => setImmediate(() => close().catch(() => {})));
+    res.on("finish", () => setImmediate(() => shutdown("see-plan stop").catch(() => {})));
   });
 
   app.post("/api/sessions", async (req, res, next) => {
@@ -439,6 +560,10 @@ export function createServer({
           return res.status(400).json(errorBody("VALIDATION_ERROR", e instanceof StoreError ? e.message : "source_file not found"));
         }
       }
+      const holder = await store.findOutputOwner(source ?? real);
+      if (holder && holder.file !== real) {
+        return res.status(409).json(errorBody("OUTPUT_IN_OTHER_SESSION", `${source ?? real} is already an output of another review. Run see-plan poll on it to join that review.`));
+      }
       let result;
       try {
         result = await openReviewSession(real, { reopen: Boolean(reopen), source_file: source, stage });
@@ -446,7 +571,8 @@ export function createServer({
         return sendStoreError(res, e);
       }
       const { status, session } = result;
-      res.json({ status, key: session.key, url: session.url, stage: session.stage ?? null, stage_source: session.stage_source ?? null });
+      rememberEnv(session.key, req);
+      res.json({ status, key: session.key, url: session.url, stage: session.stage ?? null, stage_source: session.stage_source ?? null, outputs: outputsView(session) });
     } catch (e) {
       next(e);
     }
@@ -461,6 +587,7 @@ export function createServer({
     }
     await watchSession(session);
     notifyHome();
+    if (status !== "user-ended") log(`session ${status}: ${titleOf(session)}`);
     return result;
   }
 
@@ -527,7 +654,7 @@ export function createServer({
       const lookup = await classificationLookup();
       let page;
       try {
-        page = await listErrorRecords(errorLogFile, { context, severity, limit, offset }, lookup.byClaude);
+        page = await errors.list({ context, severity, limit, offset }, lookup.byClaude);
       } catch (e) {
         return sendErrorLogError(res, e);
       }
@@ -546,7 +673,7 @@ export function createServer({
       const lookup = await classificationLookup();
       let record;
       try {
-        record = await getErrorRecord(errorLogFile, ref, lookup.byClaude);
+        record = await errors.get(ref, lookup.byClaude);
       } catch (e) {
         return sendErrorLogError(res, e);
       }
@@ -565,13 +692,59 @@ export function createServer({
       const lookup = await classificationLookup();
       let summary;
       try {
-        summary = await summarizeErrorRecords(errorLogFile, lookup.byClaude);
+        summary = await errors.summarize(lookup.byClaude);
       } catch (e) {
         return sendErrorLogError(res, e);
       }
       const project = await projectFor(req.query.project);
       const plans = project ? (await listSuperpowersPlans(project.root)).total : null;
-      res.json({ counts: summary.counts, plans, project: project ? projectView(project) : null, error_log: errorLogFile });
+      res.json({ counts: summary.counts, plans, project: project ? projectView(project) : null, error_log: errors.where, error_store: errors.kind });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Past errors like a piece of text (for agents: "has this gone wrong before?"). Pinecone matches by meaning;
+  // the local store, and Pinecone when offline, match by shared words (src/vector-cache.js).
+  const searchOff = (res) => res.status(404).json(errorBody("FEATURE_OFF", "Error search is off. Set USE_ERROR_SEARCH=true, then run see-plan stop so the next command restarts the server."));
+
+  app.get("/api/errors/similar", async (req, res, next) => {
+    try {
+      if (refusedCrossSite(req, res)) return;
+      if (!errorSearch) return searchOff(res);
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      if (!q) return res.status(400).json(errorBody("VALIDATION_ERROR", "q (the text to match) is required"));
+      if (q.length > MAX_SIMILAR_QUERY) return res.status(400).json(errorBody("VALIDATION_ERROR", `q must be at most ${MAX_SIMILAR_QUERY} characters`));
+      const context = enumParam(req.query.context, ERROR_CONTEXTS);
+      const severity = enumParam(req.query.severity, SEVERITY_FILTERS);
+      if (context === null) return res.status(400).json(errorBody("VALIDATION_ERROR", `context must be one of ${ERROR_CONTEXTS.join(", ")}`));
+      if (severity === null) return res.status(400).json(errorBody("VALIDATION_ERROR", `severity must be one of ${SEVERITY_FILTERS.join(", ")}`));
+      const limit = intParam(req.query.limit, 5, 1, 50);
+      touchIdle();
+      const lookup = await classificationLookup();
+      let found;
+      try {
+        found = await errors.similar(q, { limit, context, severity }, lookup.byClaude);
+      } catch (e) {
+        return sendErrorLogError(res, e);
+      }
+      const titles = await titlesFor(found.matches.map((m) => m.record.claude_session_id));
+      res.json({
+        engine: found.engine,
+        ...(found.fallback ? { fallback: found.fallback } : {}),
+        matches: found.matches.map((m) => ({ score: m.score, ...errorItem(m.record, lookup, titles) })),
+        error_store: errors.kind,
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/errors/store", async (req, res, next) => {
+    try {
+      if (refusedCrossSite(req, res)) return;
+      if (!errorSearch) return searchOff(res);
+      res.json({ store: await errors.describe() });
     } catch (e) {
       next(e);
     }
@@ -597,7 +770,7 @@ export function createServer({
       }
       let rated;
       try {
-        rated = await rateErrorRecord(errorLogFile, ref, body.severity, reason);
+        rated = await errors.rate(ref, body.severity, reason);
       } catch (e) {
         return sendErrorLogError(res, e);
       }
@@ -740,6 +913,77 @@ export function createServer({
     next();
   });
 
+  // M2: which live session holds this file, primary or added output.
+  app.get("/api/outputs/owner", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      if (typeof req.query.file !== "string" || !req.query.file) return res.status(400).json(errorBody("VALIDATION_ERROR", "file is required"));
+      const owner = await store.findOutputOwner(req.query.file);
+      res.json(owner ? { key: owner.key, file: owner.file, source_file: owner.source_file ?? null } : { key: null });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/outputs", async (req, res, next) => {
+    try {
+      if (isCrossSite(req) || !req.is("application/json")) return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      const { files } = req.body ?? {};
+      if (!Array.isArray(files) || !files.length || !files.every((f) => typeof f === "string" && f)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "files must be a non-empty array of paths"));
+      }
+      const items = [];
+      for (const f of files) {
+        const kind = kindOf(f);
+        if (!kind) return res.status(400).json(errorBody("VALIDATION_ERROR", `see-plan can't show this kind of file: ${f}`));
+        let real;
+        try {
+          real = await canonicalFile(f);
+          if (!(await fs.promises.stat(real)).isFile()) throw new Error("not a file");
+        } catch {
+          return res.status(400).json(errorBody("VALIDATION_ERROR", `File not found: ${f}`));
+        }
+        if (kind === "markdown") await ensurePlanHtml(real);
+        items.push({ file: real, kind });
+      }
+      let result;
+      try {
+        result = await store.addOutputs(req.params.key, items);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      for (const o of result.added) {
+        await saveOutputRevision(stateDir, req.params.key, o.id, 0, o.file).catch(() => {});
+        await watchOutput(req.params.key, o);
+      }
+      const session = await store.getSession(req.params.key);
+      if (result.added.length) broadcast(req.params.key, { type: "outputs", outputs: outputsView(session), added: result.added.map((o) => o.id) });
+      res.json({ outputs: outputsView(session), added: result.added.map((o) => o.id) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.delete("/api/:key/outputs/:id", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      try {
+        await store.removeOutput(req.params.key, req.params.id);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      const name = `${req.params.key}:o:${req.params.id}`;
+      const w = watchers.get(name);
+      watchers.delete(name);
+      await w?.close();
+      const session = await store.getSession(req.params.key);
+      broadcast(req.params.key, { type: "outputs", outputs: outputsView(session), removed: req.params.id });
+      res.json({ outputs: outputsView(session) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.post("/api/:key/prompts", async (req, res, next) => {
     try {
       if (!requireSameOrigin(req)) {
@@ -752,10 +996,17 @@ export function createServer({
       if (!valid) {
         return res.status(400).json(errorBody("VALIDATION_ERROR", "prompts must be an array of { prompt_id, prompt }"));
       }
+      // M6: the page names the output; the server fills in what the agent sees, and drops an unknown id.
+      const owner = await store.getSession(key);
+      const tagged = prompts.map((p) => {
+        const { output, ...rest } = p;
+        const view = owner ? promptOutput(owner, output) : undefined;
+        return view ? { ...rest, output: view } : rest;
+      });
       let accepted;
       try {
         ({ accepted } = await store.queuePrompts(key, {
-          prompts,
+          prompts: tagged,
           dom_snapshot: typeof dom_snapshot === "string" ? dom_snapshot : "",
           end: Boolean(end),
         }));
@@ -763,7 +1014,10 @@ export function createServer({
         return sendStoreError(res, e);
       }
       const agentNear = Boolean(activePolls.get(key)?.listening) || inGrace(key);
-      if (accepted > 0) events.emit("feedback", key);
+      if (accepted > 0) {
+        events.emit("feedback", key);
+        log(`feedback sent: ${accepted} note(s)${end ? " and ended" : ""}`);
+      }
       for (const p of prompts) {
         if (p.tag !== "chat") continue;
         const inferred = inferStageFromText(p.prompt);
@@ -819,6 +1073,7 @@ export function createServer({
       clearGrace(key);
       events.emit("ended", key);
       broadcast(key, { type: "ended", ended_by: endedBy });
+      log(`session ended by ${endedBy}`);
       res.json({ ok: true, ended_by: endedBy });
     } catch (e) {
       next(e);
@@ -1106,6 +1361,15 @@ export function createServer({
     }
   });
 
+  async function outputRevisionHtml(session, output, n) {
+    const buf = await readOutputRevision(stateDir, session.key, output.id, n);
+    if (!buf) return null;
+    if (output.kind === "html") return buf.toString("utf8");
+    if (output.kind === "markdown") return withMermaid(renderPlanHtml(buf.toString("utf8"), { title: path.parse(output.file).name }));
+    if (output.kind === "image") return renderOutputPage({ kind: "image", file: output.file, imageSrc: `data:${imageType(output.file)};base64,${buf.toString("base64")}` });
+    return renderOutputPage({ kind: output.kind, file: output.file, text: buf.toString("utf8") });
+  }
+
   app.get("/api/:key/revisions", async (req, res, next) => {
     try {
       if (isCrossSite(req)) {
@@ -1113,6 +1377,12 @@ export function createServer({
       }
       const s = await store.getSession(req.params.key);
       if (!s) return res.status(404).json(errorBody("MISSING", `no session ${req.params.key}`));
+      const outputId = typeof req.query.output === "string" && req.query.output !== "main" ? req.query.output : null;
+      if (outputId) {
+        const o = getOutput(s, outputId);
+        if (!o) return res.status(404).json(errorBody("MISSING", `no output ${outputId}`));
+        return res.json({ revision: o.revision ?? 0, revisions: await listOutputRevisions(stateDir, s.key, o.id) });
+      }
       res.json({ revision: s.revision, revisions: await listRevisions(stateDir, s.key) });
     } catch (e) {
       next(e);
@@ -1126,7 +1396,12 @@ export function createServer({
       }
       const s = await store.getSession(req.params.key);
       if (!s) return res.status(404).json(errorBody("MISSING", `no session ${req.params.key}`));
-      const html = await readRevision(stateDir, s.key, Number(req.params.n));
+      const outputId = typeof req.query.output === "string" && req.query.output !== "main" ? req.query.output : null;
+      const o = outputId ? getOutput(s, outputId) : null;
+      if (outputId && !o) return res.status(404).json(errorBody("MISSING", `no output ${outputId}`));
+      const html = o
+        ? await outputRevisionHtml(s, o, Number(req.params.n))
+        : await readRevision(stateDir, s.key, Number(req.params.n));
       if (html === null) return res.status(404).json(errorBody("NOT_FOUND", "No such revision"));
       res.set("Cache-Control", "no-cache");
       res.json({ n: Number(req.params.n), html });
@@ -1214,16 +1489,15 @@ export function createServer({
     }
   });
 
-  let statusCache = null; // findClaude spawns `where`/`which`: once per process is enough
+  // findClaude caches its `where`/`which` lookup; the strategy follows the session's newest caller (H2, H3).
   app.get("/api/claude-status", async (req, res, next) => {
     try {
       if (isCrossSite(req)) {
         return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
       }
-      statusCache ??= claudeStatus();
-      res.json(await statusCache);
+      const key = typeof req.query.key === "string" && SESSION_KEY.test(req.query.key) ? req.query.key : null;
+      res.json(await claudeStatus({ environment: key ? environmentFor(key) : detectEnvironment(), settings: launcherConfig }));
     } catch (e) {
-      statusCache = null;
       next(e);
     }
   });
@@ -1291,6 +1565,9 @@ export function createServer({
               }),
             })
             : buildPrompt({ file, stage: session.stage }),
+          feature: wf?.name,
+          environment: environmentFor(key), // H2: where the newest see-plan command for this session ran
+          config: launcherConfig,
         });
       } catch (e) {
         if (pendingLaunch.get(key) === launch) pendingLaunch.delete(key);
@@ -1301,7 +1578,14 @@ export function createServer({
       if (!resume) await linkClaudeSession(key, sessionId);
       if (wf && session.stage) await updateStage(store, wf.id, session.stage, { claude_session_id: sessionId });
       const mode = launched?.mode ?? "powershell";
-      res.json({ ok: true, claude_session_id: sessionId, mode, ...(launched?.command ? { command: launched.command } : {}) });
+      log(`Connect Claude launched: ${titleOf(session)} (${launched?.strategy ?? mode})`);
+      res.json({
+        ok: true, claude_session_id: sessionId, mode,
+        ...(launched?.strategy ? { strategy: launched.strategy } : {}),
+        ...(launched?.strategy_reasons ? { strategy_reasons: launched.strategy_reasons } : {}),
+        ...(launched?.tmux_window ? { tmux_window: launched.tmux_window } : {}),
+        ...(launched?.command ? { command: launched.command } : {}),
+      });
     } catch (e) {
       next(e);
     }
@@ -1420,7 +1704,7 @@ export function createServer({
       if (after === undefined) {
         // First read: the header needs the last prompt even when it is older than the tail window.
         if (!body.last_prompt_at) body.last_prompt_at = await findLastPromptAt(file, read.next);
-        const saved = await reportedRecords(errorLogFile, id); // and the page marks entries already logged
+        const saved = await errors.reported(id); // and the page marks entries already logged
         body.reported = saved.refs;
         body.reasons = saved.reasons;
         body.severities = saved.severities;
@@ -1480,18 +1764,18 @@ export function createServer({
       };
       let result;
       try {
-        result = await appendErrorLog(errorLogFile, record);
+        result = await errors.append(record);
       } catch (err) {
         if (!(err instanceof ErrorLogError)) throw err;
         return res.status(409).json(errorBody(err.code, err.message));
       }
       res.json({
         ok: true,
-        status: result.duplicate ? "already_logged" : "logged",
+        status: result.duplicate ? "already_logged" : (log(`error logged (${e.severity})`), "logged"),
         duplicate: result.duplicate,
         reason: result.reason, // on a duplicate, the reason saved the first time
         severity: result.severity, // ...and the severity saved the first time
-        error_log: errorLogFile,
+        error_log: errors.where,
       });
     } catch (e) {
       next(e);
@@ -1560,12 +1844,16 @@ export function createServer({
     }
     let key;
     try {
-      key = sessionKey(await canonicalFile(file));
+      const real = await canonicalFile(file);
+      // M2: polling any output of a review waits on that review.
+      key = (await store.findOutputOwner(real))?.key ?? sessionKey(real);
     } catch {
       return res.status(404).json({ status: "missing" });
     }
     const existing = await store.getSession(key);
     if (!existing) return res.status(404).json({ status: "missing" });
+    rememberEnv(key, req);
+    if (closing) return res.json({ status: "waiting", reconnect: true }); // S5: the next poll restarts the server
     watchSession(existing);
     if (vanished) return;
     if (activePolls.has(key)) {
@@ -1642,6 +1930,7 @@ export function createServer({
           pendingLaunch.delete(key);
           agents.set(key, { agent: poll.agent, sessionId: poll.sessionId, working: false });
           broadcastPresence(key);
+          log(`poll connected: ${titleOf(existing)}${poll.agent ? ` (${poll.agent})` : ""}`);
           if (effectiveTimeout > 0) {
             timer = setTimeout(() => {
               timedOut = true;
@@ -1663,6 +1952,10 @@ export function createServer({
         return;
       }
       if (timedOut && result.status === "waiting" && isAgent) result = { status: "waiting", reconnect: true };
+      if (closing && result.status === "waiting") result = { status: "waiting", reconnect: true };
+      log(result.status === "feedback"
+        ? `poll returned: ${titleOf(existing)}, ${result.prompts?.length ?? 0} note(s)${result.session_ended ? ", session ended" : ""}`
+        : `poll returned: ${titleOf(existing)}, ${result.reconnect ? "reconnect" : result.status}`);
       if (result.status === "feedback" && !result.session_ended) {
         agents.set(key, { agent: poll.agent, sessionId: poll.sessionId, working: true });
         poll.delivered = true;
@@ -1690,7 +1983,7 @@ export function createServer({
       const canResume = isClaudeSessionId(session.claude_session_id)
         && Boolean(await findTranscript(session.claude_session_id, { claudeDir }).catch(() => null));
       const workflow = session.workflow_id ? await getWorkflow(store, session.workflow_id) : null;
-      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow }));
+      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow, errorLogFile: errorLogLabel, artifactBase: `/artifact/${session.key}/${capFor(token, session.key)}` }));
     } catch (e) {
       next(e);
     }
@@ -1707,7 +2000,7 @@ export function createServer({
       res.set("X-Frame-Options", "DENY");
       res.set("Content-Security-Policy", "frame-ancestors 'none'");
       const project = await projectFor(req.query.project);
-      res.type("html").send(createLogsHtml({ baseUrl, projectKey: project?.key ?? null }));
+      res.type("html").send(createLogsHtml({ baseUrl, projectKey: project?.key ?? null, errorLogFile: errorLogLabel }));
     } catch (e) {
       next(e);
     }
@@ -1727,8 +2020,12 @@ export function createServer({
     }
   });
 
-  app.get("/artifact/:key/index.html", async (req, res, next) => {
+  // T6: artifact frames are sandboxed (opaque origin, so maybe no cookie): their URL carries a capability instead.
+  const capOk = (req) => SESSION_KEY.test(req.params.key) && safeEqual(String(req.params.cap ?? ""), capFor(token, req.params.key));
+
+  app.get("/artifact/:key/:cap/index.html", async (req, res, next) => {
     try {
+      if (!capOk(req)) return res.status(404).json(errorBody("NOT_FOUND", "Unknown artifact"));
       const session = await store.getSession(req.params.key);
       if (!session) return res.status(404).json(errorBody("NOT_FOUND", "Unknown session"));
       let html;
@@ -1739,14 +2036,91 @@ export function createServer({
       }
       res.set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'self'");
       res.set("Cache-Control", "no-cache");
-      res.type("html").send(injectSdk(html, session.key, session.revision));
+      res.type("html").send(injectSdk(withMermaid(html), session.key, session.revision));
     } catch (e) {
       next(e);
     }
   });
 
-  app.get("/artifact/:key/*splat", async (req, res, next) => {
+  // ---- M3: added outputs, under the same capability ----
+
+  const FRAME_CSP = "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'self'";
+  async function outputFor(req, res) {
+    if (!capOk(req)) {
+      res.status(404).json(errorBody("NOT_FOUND", "Unknown artifact"));
+      return null;
+    }
+    const session = await store.getSession(req.params.key);
+    const output = session && getOutput(session, req.params.id);
+    if (!output || output.primary) {
+      res.status(404).json(errorBody("NOT_FOUND", "No such output"));
+      return null;
+    }
+    return { session, output };
+  }
+
+  app.get("/artifact/:key/:cap/o/:id/index.html", async (req, res, next) => {
     try {
+      const found = await outputFor(req, res);
+      if (!found) return;
+      const { session, output } = found;
+      const servedFile = output.kind === "markdown" ? htmlPathFor(output.file) : output.file;
+      const stat = await fs.promises.stat(servedFile).catch(() => null);
+      if (!stat?.isFile()) return res.status(404).json(errorBody("NOT_FOUND", "Output file missing"));
+      res.set("Content-Security-Policy", FRAME_CSP);
+      res.set("Cache-Control", "no-cache");
+      let html;
+      const limit = maxBytesFor(output.kind);
+      if (stat.size > limit) html = placeholderPage(output.file, stat.size, limit);
+      else if (output.kind === "image") html = renderOutputPage({ kind: "image", file: output.file, imageSrc: "__raw" });
+      else {
+        const text = await fs.promises.readFile(servedFile, "utf8");
+        html = output.kind === "html" || output.kind === "markdown" ? withMermaid(text) : renderOutputPage({ kind: output.kind, file: output.file, text });
+      }
+      res.type("html").send(injectSdk(html, session.key, output.revision ?? 0));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // An image's bytes. The sandbox header applies even if an SVG is opened directly, so its scripts get no origin.
+  app.get("/artifact/:key/:cap/o/:id/__raw", async (req, res, next) => {
+    try {
+      const found = await outputFor(req, res);
+      if (!found) return;
+      if (found.output.kind !== "image") return res.status(404).json(errorBody("NOT_FOUND", "No such asset"));
+      const stat = await fs.promises.stat(found.output.file).catch(() => null);
+      if (!stat?.isFile() || stat.size > maxBytesFor("image")) return res.status(404).json(errorBody("NOT_FOUND", "No such asset"));
+      res.set("Content-Security-Policy", `${FRAME_CSP}; script-src 'none'`);
+      res.set("Cache-Control", "no-cache");
+      res.type(imageType(found.output.file)).send(await fs.promises.readFile(found.output.file));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Relative assets of an added html/Markdown output resolve next to that file.
+  app.get("/artifact/:key/:cap/o/:id/*splat", async (req, res, next) => {
+    try {
+      const found = await outputFor(req, res);
+      if (!found) return;
+      const rel = [].concat(req.params.splat).join("/");
+      const real = await resolveArtifactAsset(path.dirname(found.output.file), rel);
+      const stat = real && (await fs.promises.stat(real).catch(() => null));
+      if (!stat || !stat.isFile()) return res.status(404).json(errorBody("NOT_FOUND", "No such asset"));
+      res.set("Content-Security-Policy", FRAME_CSP);
+      res.set("Cache-Control", "no-cache");
+      res.sendFile(real, { dotfiles: "allow" }, (err) => {
+        if (err && !res.headersSent) next(err);
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/artifact/:key/:cap/*splat", async (req, res, next) => {
+    try {
+      if (!capOk(req)) return res.status(404).json(errorBody("NOT_FOUND", "Unknown artifact"));
       const session = await store.getSession(req.params.key);
       if (!session) return res.status(404).json(errorBody("NOT_FOUND", "Unknown session"));
       const rel = [].concat(req.params.splat).join("/");
@@ -1789,11 +2163,12 @@ export function createServer({
   async function onUpgrade(req, socket, head) {
     socket.on("error", () => {});
     const hostHeader = req.headers.host;
-    if (!ALLOWED_HOSTNAMES.has(hostnameOf(hostHeader))) return rejectUpgrade(socket, 403, "Forbidden");
+    if (!hostAllowed(hostHeader)) return rejectUpgrade(socket, 403, "Forbidden");
     const origin = req.headers.origin;
-    if (origin !== undefined && originOf(origin) !== `http://${hostHeader}`) {
+    if (origin !== undefined && !sameOriginSource(req, origin)) {
       return rejectUpgrade(socket, 403, "Forbidden");
     }
+    if (!authed(req)) return rejectUpgrade(socket, 401, "Unauthorized"); // T5: the cookie (or the CLI's bearer)
     let pathname;
     try {
       pathname = new URL(req.url, "http://localhost").pathname;
@@ -1876,42 +2251,73 @@ export function createServer({
       });
       httpServer.once("listening", () => {
         const actual = httpServer.address().port;
+        boundPort = actual;
         baseUrl = `http://127.0.0.1:${actual}`;
         pingTimer = setInterval(pingAll, PING_INTERVAL_MS);
         pingTimer.unref();
         updateIdle();
         // The log is one JSON array rewritten on each write: past ~1MB it should move to JSONL.
-        track(errorLogSize(errorLogFile).then((size) => log(`error log ${errorLogFile}: ${size} bytes${size > 1024 * 1024 ? " (over 1MB: consider JSONL)" : ""}`), () => {}));
+        track(errors.ready().then(
+          (d) => log(d.kind === "local"
+            ? `error log ${d.where}: ${d.records} records, ${d.bytes} bytes${d.bytes > 1024 * 1024 ? " (over 1MB: consider JSONL)" : ""}`
+            : `error store: ${errors.label}, ${d.records} records (${d.why})${d.pending ? `, ${d.pending} waiting in the outbox` : ""}`),
+          (e) => log(`error store ${errors.where}: ${e.message}`),
+        ));
         resolve({ port: actual, baseUrl });
       });
     });
   }
 
-  function close() {
+  /**
+   * S5: the one clean shutdown, shared by signals (cmdServer), POST /shutdown and the idle timeout.
+   * 1. stop accepting connections; 2. answer waiting polls with { status: "waiting", reconnect: true };
+   * 3. close WebSockets with 1001; 4. wait for in-flight store writes. (5 and 6, removing server.json and
+   * exiting, are cmdServer's.) Emits "closed" when done.
+   */
+  function shutdown(reason = null) {
     if (closing) return closing;
+    if (reason) log(`shutting down (${reason})`);
     closing = (async () => {
       clearInterval(pingTimer);
-      clearTimeout(idleTimer);
+      clearIdle();
       for (const g of graces.values()) clearTimeout(g.timer);
       graces.clear();
-      for (const poll of activePolls.values()) poll.notify();
       clearTimeout(homeTimer);
-      for (const set of sockets.values()) for (const ws of set) ws.terminate();
-      for (const ws of homeSockets) ws.terminate();
+      const stopped = new Promise((resolve) => {
+        if (!httpServer?.listening) return resolve();
+        httpServer.close(() => resolve());
+      });
+      for (const poll of activePolls.values()) poll.notify();
+      const allSockets = [...[...sockets.values()].flatMap((set) => [...set]), ...homeSockets];
+      const socketsClosed = Promise.all(allSockets.map((ws) => new Promise((resolve) => {
+        if (ws.readyState === ws.CLOSED) return resolve();
+        ws.once("close", resolve);
+        try {
+          ws.close(1001, "see-plan server shutting down");
+        } catch {
+          resolve();
+        }
+      })));
       wss.close();
       await Promise.allSettled([...watchers.values()].map((w) => w.close()));
       watchers.clear();
-      await new Promise((resolve) => {
-        if (!httpServer) return resolve();
-        httpServer.close(() => resolve());
-        httpServer.closeAllConnections?.();
-      });
-      // Let socket "close" handlers run (they may restore taken feedback), then drain.
+      // Let the polls answer, then drain background work and any queued state.json writes.
       await new Promise((resolve) => setImmediate(resolve));
       while (background.size) await Promise.allSettled([...background]);
+      await store.drain?.();
+      await Promise.race([socketsClosed, new Promise((resolve) => setTimeout(resolve, 500).unref())]);
+      for (const ws of allSockets) ws.terminate();
+      httpServer?.closeAllConnections?.();
+      await stopped;
+      // Let socket "close" handlers run (they may restore taken feedback), then drain again.
+      await new Promise((resolve) => setImmediate(resolve));
+      while (background.size) await Promise.allSettled([...background]);
+      await store.drain?.();
     })().then(() => events.emit("closed"));
     return closing;
   }
 
-  return { app, events, listen, close };
+  const close = () => shutdown(null);
+
+  return { app, events, listen, close, shutdown, token, authExempt };
 }

@@ -4,7 +4,7 @@
 
 The rest of the 2026-11-03 plan (`docs/superpowers/plans/2026-11-03-logs-sessions-plans-fixes.md`, Tasks 2–4): log hand-off, session management and plan management. Its stage inference for plan folders and its Claude-session cache shipped early (0.3.0, and again in 3.2.0).
 
-## [4.0.0] - Unreleased
+## [4.0.0] - 2026-11-08
 
 Phases 2-4 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-output.md`.
 

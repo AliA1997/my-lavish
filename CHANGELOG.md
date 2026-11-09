@@ -4,6 +4,25 @@
 
 The rest of the 2026-11-03 plan (`docs/superpowers/plans/2026-11-03-logs-sessions-plans-fixes.md`, Tasks 2–4): log hand-off, session management and plan management. Its stage inference for plan folders and its Claude-session cache shipped early (0.3.0, and again in 3.2.0).
 
+## [4.0.0] - Unreleased
+
+Phases 2-4 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-output.md`.
+
+### Breaking
+- Every API call, page and WebSocket needs the server's token: 3.x CLIs must be upgraded. Browsers sign in through `see-plan url`.
+- Artifact URLs now carry a capability (`/artifact/<key>/<cap>/…`).
+
+### Added
+- **Several outputs in one review**: `see-plan open a.md b.mmd c.html d.png`, `see-plan add`, `see-plan remove`, tabs, per-output live reload and revisions, and prompts tagged with `output`. New kinds: Mermaid (bundled, no CDN), images, text, JSON and CSV. New `multi` playbook and `examples/multi/`.
+- **Mode: Annotate / Interact**: in Interact, clicks reach the page; Alt-click still takes a note. Remembered per output.
+- **The server opens in its own window**, with a readable log and a clean shutdown (`MY_LAVISH_SERVER_WINDOW`).
+- **Headless support**: environment detection, tmux, `MY_LAVISH_LAUNCHER`, `MY_LAVISH_TERMINAL`, `MY_LAVISH_ALLOWED_HOSTS`.
+- A poll whose server goes away returns a routine reconnect.
+
+### Fixes
+- Windows: the server window and Connect Claude never appeared, because `detached` starts a process with no console, and the server's arguments reached Node as one string. Both now open through `Start-Process`.
+- Windows: writing `server.json` could fail with `EPERM` while a CLI was reading it.
+
 ## [3.3.0] - 2026-11-04
 
 Phase 1 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-output.md`: standard state paths. Not breaking: existing installs keep working with no data loss.

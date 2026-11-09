@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { toToon } from "./toon.js";
+import { kindOf } from "./outputs.js";
 import { assertHtmlFile, canonicalFile } from "./artifact-path.js";
 import { isClaudeSessionId, launcherSettings } from "./claude-launcher.js";
 import { ensurePlanHtml, generatedSourceFor, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
@@ -104,6 +105,17 @@ function sessionFeedbackStep(prompts) {
 
 const INFO_TAGS = new Set(["claude-log", "session-feedback", "decision"]);
 
+/** M6: with several outputs, says which file each note is about. Empty for a single-output review. */
+export function outputsStep(prompts) {
+  const counts = new Map();
+  for (const p of prompts) {
+    if (p?.output?.file) counts.set(p.output.file, (counts.get(p.output.file) ?? 0) + 1);
+  }
+  if (!counts.size) return "";
+  const list = [...counts].map(([f, n]) => `${n} note${n === 1 ? "" : "s"} on \`${path.basename(f)}\``).join(", ");
+  return `${list}. Each prompt's \`output.file\` is the file it refers to: edit that file, not the others. `;
+}
+
 export function createPollOutput({ file, response, errorLogFile = resolvePaths().errorLogFile }) {
   const markdown = isMarkdownPath(file);
   const approved = response.ended_by === "approved";
@@ -137,6 +149,7 @@ export function createPollOutput({ file, response, errorLogFile = resolvePaths()
         : markdown
           ? `Apply ${which} to \`${file}\` (the HTML is generated from it; \`selector\` refers to the rendered page), then ${again}.`
           : `Apply ${which} to the HTML file in place (\`selector\` says where), then ${again}.`);
+    out.next_step = outputsStep(prompts) + out.next_step;
     const extra = stageStep(response.stage, { planFile: response.workflow?.plan_file });
     if (extra && !response.session_ended) out.next_step += ` ${extra}`;
   } else if (status === "ended") {
@@ -493,10 +506,69 @@ export function headlessStep(url, port, reason, signInArg = "") {
     `\`see-plan url${signInArg ? ` ${signInArg}` : ""}\` here and open the sign-in link it prints (it works once, for a minute).`;
 }
 
-async function cmdOpen(file, flags, io) {
+/** M2: the first .html/.md file is the primary (it names the session); the rest are added to it. */
+export function splitOutputs(files) {
+  if (!files.length) return { primary: undefined, extras: [] };
+  for (const f of files) {
+    if (!kindOf(f)) throw new CliError("VALIDATION_ERROR", `see-plan can't show this kind of file: ${f}`, "Use .html, .md, .mmd, an image (.png .jpg .gif .webp .svg), or .txt .log .json .csv.");
+  }
+  const primary = files.find((f) => ["html", "markdown"].includes(kindOf(f)));
+  if (!primary) throw new CliError("VALIDATION_ERROR", "A review needs at least one .html or .md file", "Add the plan or page these outputs belong to, for example: see-plan open plan.md flow.mmd");
+  const extras = [];
+  files.forEach((f) => { if (f !== primary && !extras.includes(f)) extras.push(f); });
+  return { primary, extras };
+}
+
+async function addOutputFiles(conn, key, files, label) {
+  const real = await Promise.all(files.map((f) => canonicalFile(f).catch(() => {
+    throw new CliError("VALIDATION_ERROR", `File not found: ${f}`, "Check the path and retry.");
+  })));
+  const res = await api(conn, "POST", `/api/${key}/outputs`, { body: { files: real }, timeoutMs: 15000 });
+  if (res.status !== 200) throw httpError(res, label);
+  return res.body;
+}
+
+/** The session holding `file` (M2), so `poll` works on any output of a review. The primary's path, or `file`. */
+async function primaryFileFor(conn, file) {
+  let real;
+  try {
+    real = await canonicalFile(file);
+  } catch {
+    return file; // fileContext reports it
+  }
+  const res = await api(conn, "GET", `/api/outputs/owner?file=${encodeURIComponent(real)}`, { timeoutMs: 10000 });
+  return res.status === 200 && res.body?.key ? res.body.source_file ?? res.body.file : file;
+}
+
+async function cmdAdd(primary, files, io) {
+  if (!primary || !files.length) throw new CliError("VALIDATION_ERROR", "add needs the review's primary file and at least one output", "Run `see-plan add <primary> <file...>`.");
+  const ctx = await fileContext(primary);
+  for (const f of files) {
+    if (!kindOf(f)) throw new CliError("VALIDATION_ERROR", `see-plan can't show this kind of file: ${f}`, "Use .html, .md, .mmd, an image (.png .jpg .gif .webp .svg), or .txt .log .json .csv.");
+  }
+  const conn = await ensureServer(io.env);
+  const body = await addOutputFiles(conn, ctx.key, files, ctx.display);
+  return withServer({
+    session: { file: ctx.display, outputs: body.outputs.map(outputView) },
+    added: body.added,
+    next_step: `Added ${body.added.length} output(s); the page shows them as tabs. Run \`${POLL_CMD(ctx.display)}\` to wait for feedback.`,
+  }, conn);
+}
+
+async function cmdRemove(primary, id, io) {
+  if (!primary || !id) throw new CliError("VALIDATION_ERROR", "remove needs the review's primary file and an output id", "Run `see-plan remove <primary> <output-id>`.");
+  const ctx = await fileContext(primary);
+  const conn = await ensureServer(io.env);
+  const res = await api(conn, "DELETE", `/api/${ctx.key}/outputs/${encodeURIComponent(id)}`, { timeoutMs: 10000 });
+  if (res.status !== 200) throw httpError(res, ctx.display);
+  return { session: { file: ctx.display, outputs: res.body.outputs.map(outputView) }, next_step: `Removed ${id} from the review. Its file was not changed.` };
+}
+
+async function cmdOpen(files, flags, io) {
   const claudeSession = claudeSessionOf(flags);
-  const ctx = await fileContext(file, { regenerate: true });
-  file = ctx.display;
+  const { primary, extras } = splitOutputs(files);
+  const ctx = await fileContext(primary, { regenerate: true });
+  let file = ctx.display;
   const conn = await ensureServer(io.env);
   const body = { file: ctx.real, reopen: Boolean(flags["--reopen"]) };
   const stage = stageOf(flags);
@@ -506,6 +578,7 @@ async function cmdOpen(file, flags, io) {
   if (res.status !== 200) throw httpError(res, file);
   const { status, url } = res.body;
   if (status === "user-ended") return withServer(createUserEndedOutput({ file }), conn);
+  if (extras.length) res.body.outputs = (await addOutputFiles(conn, res.body.key, extras, file)).outputs;
   if (claudeSession) await attachClaudeSession(conn, res.body.key, claudeSession, file); // the session exists only now
   const shown = await showInBrowser(conn, new URL(url).pathname, flags, io);
   let claudeSessionId;
@@ -533,6 +606,8 @@ async function cmdOpen(file, flags, io) {
 
 async function cmdPoll(file, flags, io) {
   const claudeSession = claudeSessionOf(flags);
+  // An image, diagram or text output: wait on its review. (The server redirects an added html/.md output itself.)
+  if (file && kindOf(file) && !["html", "markdown"].includes(kindOf(file))) file = await primaryFileFor(await ensureServer(io.env), file);
   const ctx = await fileContext(file, { regenerate: true });
   const { real } = ctx;
   file = ctx.display;
@@ -1075,8 +1150,10 @@ export async function run(argv, io = { stdout: process.stdout, stderr: process.s
     let result;
     if (flags["--help"] || flags["-h"] || first === undefined) {
       result = flags["--help"] || flags["-h"] ? { usage: HOME_USAGE, next_step: "Run one of the commands above." } : await cmdHome(flags, io);
-    } else if (first === "open") result = await cmdOpen(second, flags, io);
-    else if (/\.(html?|md|markdown)$/i.test(first)) result = await cmdOpen(first, flags, io);
+    } else if (first === "open") result = await cmdOpen(positional.slice(1), flags, io);
+    else if (first === "add") result = await cmdAdd(second, positional.slice(2), io);
+    else if (first === "remove") result = await cmdRemove(second, positional[2], io);
+    else if (kindOf(first)) result = await cmdOpen(positional, flags, io);
     else if (first === "poll") result = await cmdPoll(second, flags, io);
     else if (first === "reply") result = await cmdReply(second, flags, io);
     else if (first === "end") result = await cmdEnd(second, io);

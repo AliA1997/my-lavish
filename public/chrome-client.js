@@ -127,6 +127,11 @@
   var workflow = boot.workflow && typeof boot.workflow === "object" ? boot.workflow : null;
   var latestRevision = Number(boot.revision) || 0;
   var viewingRevision = null; // a read-only older revision shown in the frame
+  var outputs = Array.isArray(boot.outputs) && boot.outputs.length ? boot.outputs : [{ id: "main", file: "", kind: "html", revision: latestRevision }];
+  var currentOutput = "main";
+  var updatedOutputs = {}; // changed while another tab was showing
+  var outputSnapshots = {}; // output id -> its DOM when last shown, sent with notes on it
+  var outputTabs = $("outputTabs");
   var shownRevision = (function () {
     var m = /[?&]rev=(\d+)/.exec(frame ? frame.getAttribute("src") || "" : "");
     return m ? Number(m[1]) : 0;
@@ -244,7 +249,7 @@
     if (!chat.length && !ended) {
       var tip = element("div", "first-run");
       tip.appendChild(element("p", "", "Click any part of the plan to leave a note, or select text and press Comment."));
-      tip.appendChild(element("p", "", "Notes wait above the tabs until you press Send to Agent. Ctrl+I turns annotate mode on and off."));
+      tip.appendChild(element("p", "", "Notes wait above the tabs until you press Send to Agent. Ctrl+I switches between Annotate and Interact; in Interact, clicks reach the page and Alt-click takes a note."));
       chatLog.appendChild(tip);
     }
     renderBubbles(chatLog, chat);
@@ -264,7 +269,114 @@
     });
   }
 
+  // ---- outputs (M1): one tab per file, one frame showing the current tab ----
+
+  function outputById(id) {
+    return outputs.filter(function (o) { return o.id === id; })[0] || null;
+  }
+
+  function fileName(file) {
+    return String(file || "").split(/[\\/]/).pop();
+  }
+
+  function modeKey(id) {
+    return "see-plan-mode:" + key + ":" + id;
+  }
+
+  /** M4: the mode picked for an output, or null. Storage can be blocked; the page works without it. */
+  function storedMode(id) {
+    try {
+      var v = window.localStorage.getItem(modeKey(id));
+      return v === "annotate" ? true : v === "interact" ? false : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function rememberMode(id, on) {
+    try {
+      window.localStorage.setItem(modeKey(id), on ? "annotate" : "interact");
+    } catch (e) {
+      // the mode just isn't remembered
+    }
+  }
+
+  function outputFrameUrl(id, revision) {
+    var base = String(boot.artifact_base || "");
+    var path = id === "main" ? "" : "/o/" + encodeURIComponent(id);
+    return base + path + "/index.html?rev=" + encodeURIComponent(String(revision));
+  }
+
+  function revisionQuery() {
+    return currentOutput === "main" ? "" : "?output=" + encodeURIComponent(currentOutput);
+  }
+
+  function renderOutputTabs() {
+    if (!outputTabs) return;
+    outputTabs.hidden = outputs.length < 2;
+    outputTabs.textContent = "";
+    if (outputs.length < 2) return;
+    outputs.forEach(function (o) {
+      var notes = queue.filter(function (q) { return (q.output || "main") === o.id && q.tag !== "chat" && q.tag !== "plan"; }).length;
+      var label = fileName(o.file) || o.id;
+      var tab = element("button", "output-tab", label + (notes ? " (" + notes + ")" : "") + (updatedOutputs[o.id] ? " •" : ""));
+      tab.type = "button";
+      tab.id = "output-tab-" + o.id;
+      tab.title = o.kind + ": " + o.file;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", o.id === currentOutput ? "true" : "false");
+      tab.setAttribute("aria-label", label + (notes ? ", " + notes + " queued notes" : "") + (updatedOutputs[o.id] ? ", updated" : ""));
+      tab.tabIndex = o.id === currentOutput ? 0 : -1;
+      tab.addEventListener("click", function () { selectOutput(o.id); });
+      outputTabs.appendChild(tab);
+    });
+  }
+
+  function selectOutput(id, focus) {
+    var o = outputById(id);
+    if (!o) return;
+    if (id !== currentOutput || viewingRevision !== null) {
+      currentOutput = id;
+      delete updatedOutputs[id];
+      viewingRevision = null;
+      revisionBar.hidden = true;
+      latestRevision = Number(o.revision) || 0;
+      renderRevisionButton();
+      var mode = storedMode(id);
+      annotate = ended ? false : mode === null ? true : mode;
+      renderControls();
+      loadLatest(latestRevision);
+      previousSnapshot = null; // another file: nothing to compare with
+      pendingRestore = null;
+      lastScroll = null;
+    }
+    renderOutputTabs();
+    if (focus) {
+      var tab = $("output-tab-" + id);
+      if (tab) tab.focus();
+    }
+  }
+
+  function applyOutputs(list, added) {
+    if (!Array.isArray(list) || !list.length) return;
+    outputs = list;
+    if (!outputById(currentOutput)) selectOutput("main");
+    renderOutputTabs();
+    if (added && added.length) showHint("Added: " + added.join(", "), false);
+  }
+
+  if (outputTabs) {
+    outputTabs.addEventListener("keydown", function (event) {
+      var i = outputs.indexOf(outputById(currentOutput));
+      var next = event.key === "ArrowRight" ? i + 1 : event.key === "ArrowLeft" ? i - 1 : event.key === "Home" ? 0 : event.key === "End" ? outputs.length - 1 : null;
+      if (next === null) return;
+      event.preventDefault();
+      selectOutput(outputs[(next + outputs.length) % outputs.length].id, true);
+    });
+  }
+
   function renderQueue() {
+    renderOutputTabs();
     queuedLog.textContent = "";
     if (queue.length) queuedLog.appendChild(element("p", "queued-title", queue.length + (queue.length === 1 ? " note" : " notes") + " not sent yet"));
     queue.forEach(function (item) {
@@ -307,7 +419,10 @@
     moreButton.disabled = ended;
     annotateButton.disabled = ended;
     annotateButton.setAttribute("aria-pressed", annotate && !ended ? "true" : "false");
-    annotateButton.textContent = annotate && !ended ? "Annotate: on" : "Annotate: off";
+    annotateButton.textContent = annotate && !ended ? "Mode: Annotate" : "Mode: Interact";
+    annotateButton.title = annotate && !ended
+      ? "Clicks take notes. Switch to Interact to use the page (Ctrl+I)."
+      : "Clicks go to the page. Alt-click still takes a note (Ctrl+I).";
     approveButton.disabled = locked;
     requestChangesButton.disabled = locked;
   }
@@ -745,11 +860,12 @@
 
   function setFrameMode(on) {
     annotate = Boolean(on);
+    rememberMode(currentOutput, annotate);
     postToFrame({ type: "setMode", annotate: annotate });
     renderControls();
   }
 
-  function enqueue(raw) {
+  function enqueue(raw, outputId) {
     if (ended) {
       showHint("Session ended — new notes are not sent.", true);
       return;
@@ -762,6 +878,7 @@
       selector: typeof raw.selector === "string" ? raw.selector : "",
       text: typeof raw.text === "string" ? raw.text : "",
     };
+    if (outputId) item.output = outputId;
     if (raw.target && typeof raw.target === "object") {
       try {
         item.target = JSON.parse(JSON.stringify(raw.target));
@@ -798,7 +915,11 @@
     if (ended) {
       postToFrame({ type: "setMode", annotate: false });
       postToFrame({ type: "ended" });
-    } else if (frameLoads > 1) postToFrame({ type: "setMode", annotate: annotate });
+    } else if (frameLoads > 1 || storedMode(currentOutput) !== null) {
+      var stored = storedMode(currentOutput);
+      if (stored !== null) annotate = stored;
+      postToFrame({ type: "setMode", annotate: annotate });
+    }
     if (pendingRestore) {
       postToFrame({ type: "restoreScroll", x: pendingRestore.x, y: pendingRestore.y });
       pendingRestore = null;
@@ -809,7 +930,10 @@
         if (added.length) postToFrame({ type: "highlightChanges", added: added });
       }
       previousSnapshot = null;
-      if (html) currentSnapshot = html;
+      if (html) {
+        currentSnapshot = html;
+        outputSnapshots[currentOutput] = html;
+      }
     });
   }
 
@@ -819,7 +943,7 @@
     if (!data || typeof data !== "object" || data.source !== SOURCE) return;
     switch (data.type) {
       case "queuePrompt":
-        enqueue(data.prompt);
+        enqueue(data.prompt, currentOutput);
         break;
       case "snapshot":
         if (typeof data.id === "string" && snapshotWaiters[data.id]) snapshotWaiters[data.id](data.html);
@@ -830,6 +954,7 @@
       case "mode":
         if (!ended) {
           annotate = Boolean(data.annotate);
+          if (data.user) rememberMode(currentOutput, annotate);
           renderControls();
         }
         break;
@@ -838,6 +963,19 @@
         break;
     }
   });
+
+  /** M6: with several outputs, the snapshot covers only the outputs that have notes, each labeled. */
+  function snapshotFor(batch, current) {
+    if (outputs.length < 2) return current;
+    var seen = {};
+    return batch.map(function (p) { return p.output; }).filter(function (id) {
+      if (!id || seen[id] || !outputSnapshots[id]) return false;
+      seen[id] = true;
+      return true;
+    }).map(function (id) {
+      return "<!-- see-plan output: " + id + " -->\n" + outputSnapshots[id];
+    }).join("\n");
+  }
 
   function requestSnapshot() {
     return new Promise(function (resolve) {
@@ -859,7 +997,7 @@
     previousSnapshot = currentSnapshot;
     frame.removeAttribute("srcdoc");
     // The artifact URL carries a capability (the frame is sandboxed, so it may not send the sign-in cookie).
-    frame.src = String(boot.artifact_base || "") + "/index.html?rev=" + encodeURIComponent(String(revision));
+    frame.src = outputFrameUrl(currentOutput, revision);
   }
 
   // ---- revisions -----------------------------------------------------------
@@ -886,7 +1024,7 @@
     if (!open) return;
     revisionMenu.textContent = "";
     revisionMenu.appendChild(element("span", "menu-note", "Loading…"));
-    fetch("/api/" + encodeURIComponent(key) + "/revisions")
+    fetch("/api/" + encodeURIComponent(key) + "/revisions" + revisionQuery())
       .then(readJson)
       .then(function (body) {
         revisionMenu.textContent = "";
@@ -911,7 +1049,7 @@
   }
 
   function showRevision(n) {
-    fetch("/api/" + encodeURIComponent(key) + "/revisions/" + n)
+    fetch("/api/" + encodeURIComponent(key) + "/revisions/" + n + revisionQuery())
       .then(readJson)
       .then(function (body) {
         if (!body || typeof body.html !== "string") return showHint("That revision is gone.", true);
@@ -968,10 +1106,11 @@
     showHint("Sending…", false);
     requestSnapshot()
       .then(function (snapshot) {
+        if (snapshot) outputSnapshots[currentOutput] = snapshot;
         return fetch("/api/" + encodeURIComponent(key) + "/prompts", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ prompts: batch, dom_snapshot: snapshot, end: Boolean(end) }),
+          body: JSON.stringify({ prompts: batch, dom_snapshot: snapshotFor(batch, snapshot), end: Boolean(end) }),
         });
       })
       .then(function (res) {
@@ -1395,8 +1534,20 @@
       pruneQueue(msg.chat);
     } else if (msg.type === "presence") {
       setPresence(msg);
+    } else if (msg.type === "outputs") {
+      applyOutputs(msg.outputs, msg.added);
+    } else if (msg.type === "reload" && msg.output && msg.output !== currentOutput || (msg.type === "reload" || msg.type === "revision") && !msg.output && currentOutput !== "main") {
+      // M5: a tab that isn't showing: note it, and reload when it's picked.
+      var changed = outputById(msg.output || "main");
+      if (changed && Number(changed.revision) !== Number(msg.revision)) {
+        changed.revision = Number(msg.revision);
+        updatedOutputs[changed.id] = true;
+        renderOutputTabs();
+      }
     } else if (msg.type === "reload" || (msg.type === "revision" && Number(msg.revision) !== shownRevision)) {
       latestRevision = Number(msg.revision);
+      var shownOutput = outputById(currentOutput);
+      if (shownOutput) shownOutput.revision = latestRevision;
       if (viewingRevision === null) loadLatest(msg.revision);
       else revisionBarText.textContent = "Viewing revision r" + viewingRevision + " (read-only). A newer revision r" + latestRevision + " is available.";
       renderRevisionButton();

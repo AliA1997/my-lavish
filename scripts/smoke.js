@@ -14,7 +14,7 @@ const EXAMPLE = path.join(ROOT, "examples", "plan.html");
 const binIndex = process.argv.indexOf("--bin");
 let EXE = binIndex >= 0 ? path.resolve(process.argv[binIndex + 1]) : null;
 if (EXE && process.platform === "win32" && !EXE.endsWith(".exe") && fs.existsSync(`${EXE}.exe`)) EXE += ".exe";
-const ASSETS = ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css", "errors-client.js", "errors.css"];
+const ASSETS = ["sdk.js", "chrome-client.js", "chrome.css", "logs-client.js", "logs.css", "home-client.js", "home.css", "errors-client.js", "errors.css", "output-render.js", "vendor/mermaid.min.js"];
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -154,6 +154,7 @@ async function main(env, workDir) {
 
   await cli(["end", file, "--json"], env);
   await errorTabs(baseUrl, workDir, stateDir);
+  await multiOutput(baseUrl, workDir);
 }
 
 const PLAN_CLAUDE = "00000000-0000-4000-8000-00000000a001";
@@ -208,6 +209,25 @@ async function errorTabs(baseUrl, workDir, stateDir) {
   assert(sessions.sessions.length === 2, `sessions tab lists the 2 Claude sessions, got ${sessions.sessions.length}`);
   const planRow = sessions.sessions.find((s) => s.id === PLAN_CLAUDE);
   assert(planRow?.review_key === planKey && planRow.stage === "plan" && planRow.error_count === 4, "sessions tab links the plan session");
+}
+
+/** 4.9: one review with three outputs; a note on each comes back tagged, and polling an added output joins the review. */
+async function multiOutput(baseUrl, workDir) {
+  const dir = path.join(workDir, "multi");
+  fs.mkdirSync(dir);
+  const files = { main: "m.html", flow: "f.mmd", data: "d.csv" };
+  fs.writeFileSync(path.join(dir, files.main), "<html><body><p>m</p></body></html>");
+  fs.writeFileSync(path.join(dir, files.flow), "graph TD; A-->B");
+  fs.writeFileSync(path.join(dir, files.data), "a,b\n1,2\n");
+  const opened = JSON.parse(await cli(["open", ...Object.values(files).map((f) => path.join(dir, f)), "--no-open", "--json"], env));
+  assert(opened.session.outputs?.length === 3, `three outputs: ${JSON.stringify(opened.session.outputs)}`);
+  const key = new URL(opened.session.url).pathname.split("/").pop();
+  const prompts = ["main", "f-mmd", "d-csv"].map((output, i) => ({ prompt_id: `m${i}`, prompt: `note ${i}`, tag: "p", selector: "p", text: "", output }));
+  await jsonFetch(`${baseUrl}/api/${key}/prompts`, { method: "POST", headers: { "content-type": "application/json", origin: baseUrl }, body: JSON.stringify({ prompts, dom_snapshot: "" }) });
+  const polled = JSON.parse(await cli(["poll", path.join(dir, files.flow), "--timeout-ms", "3000", "--json"], env));
+  assert(polled.prompts?.map((p) => p.output?.id).join() === "main,f-mmd,d-csv", `tagged notes: ${JSON.stringify(polled.prompts)}`);
+  assert(polled.next_step.includes("1 note on `f.mmd`"), `grouped next_step: ${polled.next_step}`);
+  await cli(["end", path.join(dir, files.main), "--json"], env);
 }
 
 /** S4 leak test: the server's log never holds the token, a nonce, the cookie, sign-in links or note text. */

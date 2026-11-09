@@ -68,9 +68,10 @@ test("the runtime file is written atomically, user-only on POSIX, and stale pids
     try {
       reads.push(JSON.parse(fs.readFileSync(path.join(sub, "server.json"), "utf8")).token.length);
     } catch (e) {
-      if (e.code !== "ENOENT") reads.push("partial");
+      if (e instanceof SyntaxError) reads.push("partial"); // Windows may briefly refuse the open during a rename
     }
   }, 0);
+  t.after(() => clearInterval(reader)); // a failed write must not leave this running
   for (let i = 0; i < 30; i++) {
     await writeRuntimeFile(sub, { port: 4388, pid: process.pid, token: createToken(), version: "t" }, { execFileFn: (c, a, o, cb) => cb(null) });
   }
@@ -154,7 +155,7 @@ function routesOf(app) {
   return out;
 }
 
-const EXEMPT = new Set(["GET /health", "GET /auth", "GET /artifact/:key/:cap/index.html", "GET /artifact/:key/:cap/*splat"]);
+const EXEMPT = new Set(["GET /health", "GET /auth", "GET /artifact/:key/:cap/index.html", "GET /artifact/:key/:cap/*splat", "GET /artifact/:key/:cap/o/:id/index.html", "GET /artifact/:key/:cap/o/:id/__raw", "GET /artifact/:key/:cap/o/:id/*splat"]);
 
 test("every route needs the token unless it is explicitly exempt (a new route must be covered)", async (t) => {
   const { srv, port, key } = await setup(t);
@@ -168,7 +169,7 @@ test("every route needs the token unless it is explicitly exempt (a new route mu
       continue;
     }
     if (EXEMPT.has(r)) continue;
-    const res = await raw(port, fill(p), { method, headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` }, body: method === "GET" ? undefined : "{}" });
+    const res = await raw(port, fill(p), { method, headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` }, body: method === "POST" ? "{}" : undefined });
     assert.equal(res.status, 401, `${r} without credentials answered ${res.status}`);
   }
   const health = JSON.parse((await raw(port, "/health")).text);

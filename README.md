@@ -180,7 +180,31 @@ Every output includes a `next_step` telling the agent what to do next.
 - With no session attached, or one with no transcript (such as a Connect Claude launch that never started), the tab lists the **20 most recent Claude sessions**, newest first. Each is titled by its `/rename` title or first prompt; built-in commands such as `/clear` or `/model` are skipped. Click one to show its log, or paste an id. **Change session** reopens the list.
 - **Click a log entry** to open a small note box: **Send to agent** (a `claude-log` note with your text), **Log as error** (the server appends it to the error log with the severity you pick in the box, and your text saved as the `reason`), or **Both**. *Log as error* and *Both* need a severity; High and Send to IT also need a note. The agent is never asked to write files. A sent entry is marked. Select text inside an entry to copy it instead.
 - **Claude log page** (`/claude`, opened by `see-plan logs`): the newest Claude session's id and last-prompt date on top, its log below, and a **Recent sessions** menu for the other 19. The log loads at least 200 entries when the session has that many (reading up to 16 MB back), then updates live. Add `?id=<uuid>` to the URL to open a given session. No agent is involved here: clicking an entry opens a confirmation dialog with a preview, a required **severity** (keys 1–4 pick one) and a reason (up to 2,000 characters; required for High and Send to IT). **Log as error** (or Ctrl/Cmd+Enter) makes the server append it (session id, line `uuid`, part, role, kind, time, text, `reason`, `severity`, `context`, `review_key`, `stage`, `reported_at`) to the error log itself (`see-plan paths` shows where); Esc cancels. Clicking an entry that is already logged shows its saved reason and severity, read-only: the first ones are kept. Logged entries carry a severity badge. The page header links to the dashboard and the **Error logs** page. It creates the file if missing, keeps the records already there, skips an entry that is already logged, and refuses to touch a file that is not a JSON array.
-- Every local process is trusted: the server has no token, so any process on this machine can attach a session id or trigger a launch. Do not run it on a shared machine.
+- **What the token protects.** The server makes a new secret token at each start and keeps it in a file only your user can read (`server.json` in the runtime folder; see `see-plan paths`). The CLI sends it on every call, and the browser signs in through a one-time link that sets a cookie. Run `see-plan url` to get a link. This stops other OS users on the machine, sandboxed or containerised processes that can reach `127.0.0.1` but can't read your files, and attacks from websites. It does **not** stop malware already running as you: that can read the token file, and everything else you own.
+
+## Several outputs in one review
+
+```
+see-plan open plan.md flow.mmd prototype.html screenshot.png results.csv
+```
+
+The page shows one tab per file, and the first `.html` or `.md` file is the primary. Try it with the files in `examples/multi/`. A review holds up to 12 outputs; add or take them out while it runs with `see-plan add <primary> <file...>` and `see-plan remove <primary> <output-id>`.
+
+| Kind | Files | Notes you can leave |
+| --- | --- | --- |
+| HTML | `.html` `.htm` | Click or select. **Mode: Interact** (Ctrl+I) lets clicks reach the page so prototypes work; Alt-click still takes a note |
+| Markdown | `.md` `.markdown` | Click or select; `mermaid` code blocks are drawn |
+| Mermaid | `.mmd` `.mermaid` | Click a node |
+| Image | `.png` `.jpg` `.gif` `.webp` `.svg` | Click a point or drag a box (percent of the image) |
+| Text | `.txt` `.log` `.json` `.csv` | Click a line, or a row for `.csv` |
+
+Everything renders locally, with no CDN. Files over 5 MB (10 MB for images) show a placeholder. Polling any output waits on the whole review. Each prompt has `output: {id, file, kind}`, and each file live-reloads and keeps its own revisions.
+
+## Starting the server, and running without a desktop
+
+When a command has to start the server, it opens in **its own terminal window** with a live log. Closing that window, pressing Ctrl+C or running `see-plan stop` stops it; the next command starts it again, and queued notes are kept. Inside tmux it opens as a background tmux window. Over SSH, in containers and in CI it runs hidden, logging to `server.log`.
+
+With no desktop, see-plan prints the URL instead of opening a browser: forward the port (`ssh -L 4388:127.0.0.1:4388 <host>`), then run `see-plan url` and open the link. Connect Claude uses a terminal window, then tmux, then shows a command to copy.
 
 ## Error logs
 
@@ -234,6 +258,10 @@ None are required; the defaults work out of the box. Set them only to change the
 | `MY_LAVISH_PORT` | `4388` | Server port |
 | `MY_LAVISH_STATE_DIR` | platform standard; see `see-plan paths` | Holds `state.json`, `revisions/` and `feedback.jsonl`. Setting it also moves `server.log` and the runtime file `server.json` there, so an isolated server never reads another one's token |
 | `MY_LAVISH_DATA_DIR` | platform standard; see `see-plan paths` | Holds `error-log.json` |
+| `MY_LAVISH_SERVER_WINDOW` | `auto` | `auto`, `window`, `tmux` or `hidden`: how a started server is shown |
+| `MY_LAVISH_LAUNCHER` | `auto` | `auto`, `terminal`, `tmux`, `copy` or `off`: how Connect Claude starts Claude |
+| `MY_LAVISH_TERMINAL` | unset | A JSON argv array for your terminal, such as `["wezterm","start","--","{cmd...}"]` |
+| `MY_LAVISH_ALLOWED_HOSTS` | unset | Extra exact host names for a port forwarder. The token is still required |
 | `MY_LAVISH_NO_OPEN` | unset | `1` = never launch a browser (same as `--no-open`) |
 | `MY_LAVISH_IDLE_TIMEOUT_MS` | `1800000` | Server exits after this long with no WebSocket or poll connections; `0` or `off` disables |
 | `MY_LAVISH_ERROR_LOG` | `<data dir>/error-log.json` | Where the server writes logged errors (wins over `MY_LAVISH_DATA_DIR`) |
@@ -246,7 +274,7 @@ Example (bash): `MY_LAVISH_PORT=5000 see-plan examples/plan.html`
 Left out on purpose, to keep only the core loop:
 
 - Tailscale / phone access
-- Excalidraw and Mermaid whiteboards
+- Excalidraw whiteboards (Mermaid diagrams are supported as outputs)
 - Layout-issue audit
 - Image attachments
 - Export and sharing

@@ -265,11 +265,21 @@
   }
 
   function openElementCard(el, x, y) {
-    var tag = el.tagName.toLowerCase();
-    var selector = cssSelector(el);
-    var text = elementText(el);
+    // M3: a text line, table row, diagram node or image region says exactly what the note is about.
+    var anchor = (el.closest && el.closest("[data-see-plan-target]")) || el;
+    var tag = anchor.tagName.toLowerCase();
+    var selector = cssSelector(anchor);
+    var text = elementText(anchor);
+    var target = null;
+    try {
+      target = JSON.parse(anchor.getAttribute("data-see-plan-target"));
+    } catch (e) {
+      target = null;
+    }
     openCard(x, y, "Note on " + tag, function (note) {
-      return { prompt: note, tag: tag, selector: selector, text: text };
+      var prompt = { prompt: note, tag: tag, selector: selector, text: text };
+      if (target && typeof target === "object") prompt.target = target;
+      return prompt;
     });
   }
 
@@ -355,9 +365,12 @@
   // ---- annotate clicks, selection, shortcuts -------------------------------
 
   window.addEventListener("click", function (event) {
-    if (!annotate || event.button !== 0) return;
+    if (event.button !== 0) return;
+    // M4: in Interact mode clicks belong to the page; Alt-click still takes a note, on any element.
+    var altNote = !annotate && event.altKey && !ended;
+    if (!annotate && !altNote) return;
     var target = event.target;
-    if (!isAnnotatable(target)) return;
+    if (altNote ? !isElement(target) || isUi(target) : !isAnnotatable(target)) return;
     var sel = window.getSelection && window.getSelection();
     if (sel && !sel.isCollapsed && sel.toString().trim()) return; // a text selection, not a click
     event.preventDefault();
@@ -379,14 +392,14 @@
         && (event.key === "i" || event.key === "I")) {
       event.preventDefault();
       event.stopPropagation();
-      setAnnotate(!annotate);
+      setAnnotate(!annotate, true);
     }
   }, true);
 
-  function setAnnotate(on) {
+  function setAnnotate(on, byUser) {
     annotate = Boolean(on);
     if (!annotate) clearHover();
-    post({ type: "mode", annotate: annotate });
+    post({ type: "mode", annotate: annotate, user: Boolean(byUser) });
   }
 
   // ---- scroll, snapshot, ready ---------------------------------------------
@@ -422,7 +435,7 @@
     var injected = root.querySelectorAll("[" + UI_ATTR + "], script[src]");
     for (var j = 0; j < injected.length; j++) {
       var node = injected[j];
-      if (node.localName === "script" && !/^\/sdk\.js(\?|$)/.test(node.getAttribute("src") || "")) continue;
+      if (node.localName === "script" && !/^\/(sdk\.js|output-render\.js|vendor\/mermaid\.min\.js)(\?|$)/.test(node.getAttribute("src") || "")) continue;
       if (node.parentNode) node.parentNode.removeChild(node);
     }
     return root.outerHTML.slice(0, MAX_SNAPSHOT_CHARS);

@@ -1,3 +1,4 @@
+import { outputsOf } from "./outputs.js";
 import fs from "node:fs";
 import { escapeHtml, serializeChat } from "./markdown.js";
 import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES } from "./stages.js";
@@ -48,6 +49,7 @@ export function createChromeHtml(session, { baseUrl, canResume = false, workflow
     history: (session.history ?? []).map((h) => ({ ended_at: h.ended_at ?? null, ended_by: h.ended_by ?? null, chat: serializeChat(h.chat ?? []) })),
     workflow: workflowView(workflow, baseUrl ?? ""),
     artifact_base: artifactBase,
+    outputs: outputsOf(session).map((o) => ({ id: o.id, file: o.file, kind: o.kind, revision: o.revision ?? 0 })),
   };
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
   const title = escapeHtml(artifactTitle(session));
@@ -68,6 +70,7 @@ export function createChromeHtml(session, { baseUrl, canResume = false, workflow
 <div id="app">
   <main id="stage">
     <div id="revisionBar" role="status" hidden><span id="revisionBarText"></span> <button id="backToLatest" type="button">Back to latest</button></div>
+    <div id="outputTabs" role="tablist" aria-label="Outputs in this review" hidden></div>
     <iframe id="artifact" title="Artifact under review" sandbox="allow-scripts allow-forms allow-popups" src="${src}"></iframe>
   </main>
   <aside id="panel" aria-label="Review panel">

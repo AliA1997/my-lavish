@@ -1,6 +1,6 @@
 # see-plan: multiple outputs per review, standard state paths, a local auth token, headless Connect Claude, and a visible server window
 
-Date: 2026-11-04 · Status: **approved 2026-11-04 (all open questions decided), not started** · Version at time of writing: 3.2.0 (`main` @ 734c07f) · Ships as **3.3.0** (Phase 1, paths) then **4.0.0** (Phases 2–4; breaking: API auth, artifact URLs)
+Date: 2026-11-04 · Status: **implemented 2026-11-08 (4.0.0, unreleased); see "Implementation notes" at the end** · Version at time of writing: 3.2.0 (`main` @ 734c07f) · Ships as **3.3.0** (Phase 1, paths) then **4.0.0** (Phases 2–4; breaking: API auth, artifact URLs)
 
 ## Why this plan exists
 
@@ -263,3 +263,11 @@ All questions were decided on 2026-11-04.
 - **Q6. Decided:** the error log keeps the name **`error-log.json`** in the new data folder.
 - **Q7. Decided 2026-11-04:** the server window **opens by default** (`auto`) on a desktop, in a normal (not minimized) window. It opens at most once per server lifetime, and `MY_LAVISH_SERVER_WINDOW=hidden` brings back the old behaviour.
 - **Q8. Decided 2026-11-04:** the server window **does not show a sign-in link**, because its text can be seen by screen sharing and terminal scrollback. Its banner says "run `see-plan url`" instead (S4).
+
+## Implementation notes (2026-11-08)
+
+- **M2 changed:** the first .html or .md file is the primary, not the first file, because the session key needs a page. A review with no .html or .md file is refused.
+- **Windows launch changed from S3:** both windows open through a hidden PowerShell that calls `Start-Process`, because Node's `detached` has no console on Windows.
+- **Checked in real Chrome (headless), on Windows:** sign-in, tabs, Mermaid, images, CSV, Interact mode, Alt-click and tagged notes. Firefox (Task 2.4) was not checked.
+- **Checked on Windows 11:** the server window opens with its title; killing the server during a poll gives `reconnect: true`.
+- **Not checked:** macOS and Linux desktop windows, closing the window by hand, and Connect Claude actually launching in the new console.

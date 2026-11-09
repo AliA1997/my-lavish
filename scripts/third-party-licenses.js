@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ALLOWED = new Set(["MIT", "ISC", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "0BSD"]);
+const ALLOWED = new Set(["MIT", "ISC", "BSD-2-Clause", "BSD-3-Clause", "Apache-2.0", "0BSD", "Unlicense"]);
 
 function arg(name) {
   const i = process.argv.indexOf(name);
@@ -71,7 +71,23 @@ async function nodeLicense() {
   return (await res.text()).trim();
 }
 
-const packages = [...collect(npmLs()).values()].sort((a, b) => a.name.localeCompare(b.name));
+/** public/vendor/mermaid.min.js is a dev dependency in npm's eyes but ships in every release. */
+function vendoredTree() {
+  const lock = JSON.parse(fs.readFileSync(path.join(ROOT, "package-lock.json"), "utf8")).packages;
+  const seen = new Map();
+  const visit = (name) => {
+    const entry = lock[`node_modules/${name}`];
+    if (!entry || seen.has(name)) return;
+    seen.set(name, { name, version: entry.version });
+    Object.keys(entry.dependencies ?? {}).forEach(visit);
+  };
+  visit("mermaid");
+  if (!seen.size) throw new Error("mermaid is not in package-lock.json");
+  return [...seen.values()];
+}
+
+const allPackages = new Map([...collect(npmLs()).values(), ...vendoredTree()].map((p) => [`${p.name}@${p.version}`, p]));
+const packages = [...allPackages.values()].sort((a, b) => a.name.localeCompare(b.name));
 const sections = [];
 const problems = [];
 const counts = {};
@@ -82,7 +98,9 @@ for (const { name, version } of packages) {
     continue;
   }
   const pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
-  const id = licenseId(pkg);
+  // khroma's package.json names no license; its license file is MIT.
+  const declared = licenseId(pkg);
+  const id = declared === "UNKNOWN" && /^(The )?MIT License/i.test(licenseText(dir) ?? "") ? "MIT" : declared;
   counts[id] = (counts[id] ?? 0) + 1;
   if (!allowed(id)) problems.push(`${name}@${version}: license "${id}" is not in the allowlist`);
   const text = licenseText(dir) ?? `(No license file in the package; package.json declares ${id}.)`;

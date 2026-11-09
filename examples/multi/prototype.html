@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Checkout prototype</title>
+<style>
+body { font: 16px/1.5 system-ui, sans-serif; max-width: 480px; margin: 2rem auto; padding: 0 1rem; }
+.card { border: 1px solid #c8ccd0; border-radius: 8px; padding: 1rem; margin: 1rem 0; cursor: pointer; }
+.card.picked { border-color: #1a7f37; background: #eaf7ee; }
+dialog { border-radius: 8px; border: 1px solid #c8ccd0; }
+</style>
+</head>
+<body>
+<h1>Checkout</h1>
+<p>Switch the panel to <b>Mode: Interact</b>, then pick a delivery option and place the order. Alt-click anything to leave a note.</p>
+<div class="card" id="standard">Standard delivery: free</div>
+<div class="card" id="express">Express delivery: $9</div>
+<p id="total">Total: $40</p>
+<button id="place" type="button">Place order</button>
+<dialog id="done"><p>Order placed.</p><form method="dialog"><button>Close</button></form></dialog>
+<script>
+  var cards = document.querySelectorAll(".card");
+  cards.forEach(function (card) {
+    card.addEventListener("click", function () {
+      cards.forEach(function (c) { c.classList.remove("picked"); });
+      card.classList.add("picked");
+      document.getElementById("total").textContent = "Total: $" + (card.id === "express" ? 49 : 40);
+    });
+  });
+  document.getElementById("place").addEventListener("click", function () {
+    document.getElementById("done").showModal();
+  });
+</script>
+</body>
+</html>

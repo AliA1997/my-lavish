@@ -1,0 +1,5 @@
+graph TD
+  Cart[Cart] --> Address[Address]
+  Address --> Payment[Payment]
+  Payment -->|accepted| Done[Order placed]
+  Payment -->|declined| Address

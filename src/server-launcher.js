@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
-import { LINUX_TERMINALS, OSASCRIPT_PATH, POWERSHELL_PATH, buildTmuxLaunch, expandTerminal, findTerminal, spawnChecked, whichOf } from "./claude-launcher.js";
+import { LINUX_TERMINALS, OSASCRIPT_PATH, POWERSHELL_PATH, buildTmuxLaunch, windowsConsoleArgs, expandTerminal, findTerminal, spawnChecked, whichOf } from "./claude-launcher.js";
 
 export const SERVER_WINDOW_SETTINGS = ["auto", "window", "tmux", "hidden"];
 /** S7: a terminal window can take seconds to come up (Terminal.app cold start, a PowerShell profile). */
@@ -36,7 +36,8 @@ export function chooseServerMode(environment, setting = "auto") {
 // Windows (S3, S6): a constant script; the exe, its arguments (JSON) and the title travel in env vars.
 const PS_SCRIPT = [
   "$Host.UI.RawUI.WindowTitle = $env:SEE_PLAN_TITLE",
-  "$a = @(ConvertFrom-Json $env:SEE_PLAN_SERVER_ARGS)",
+  // The pipe unrolls it: PowerShell 5.1 would otherwise pass the whole JSON array as one argument.
+  "$a = @($env:SEE_PLAN_SERVER_ARGS | ConvertFrom-Json | ForEach-Object { $_ })",
   "& $env:SEE_PLAN_SERVER_EXE @a",
   'if ($LASTEXITCODE -ne 0) { Read-Host "see-plan server stopped with an error (exit $LASTEXITCODE). Press Enter to close" }',
 ].join("\n");
@@ -74,10 +75,9 @@ export function buildServerLaunch({ mode, platform, exe, args, env, port, termin
   if (platform === "win32") {
     return {
       command: POWERSHELL_PATH,
-      args: ["-NoLogo", "-NoProfile", "-EncodedCommand", Buffer.from(PS_SCRIPT, "utf16le").toString("base64")],
+      args: windowsConsoleArgs(PS_SCRIPT),
       env: { ...childEnv, SEE_PLAN_SERVER_EXE: exe, SEE_PLAN_SERVER_ARGS: JSON.stringify(args), SEE_PLAN_TITLE: title },
-      // detached on Windows gives the child its own, visible console window.
-      options: { detached: true, stdio: "ignore", windowsHide: false },
+      options: { stdio: "ignore", windowsHide: true }, // only the short-lived launcher is hidden: see windowsConsoleArgs
     };
   }
   const argv = posixServerArgv({ exe, args, env: childEnv, title });

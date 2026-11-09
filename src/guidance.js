@@ -95,6 +95,18 @@ export const PLAYBOOKS = [
     ].join("\n"),
   },
   {
+    id: "multi",
+    use_when: "The work is clearer as several files: a plan plus a diagram, a clickable prototype or a screenshot",
+    guidance: [
+      "Open them as one review: `see-plan open plan.md flow.mmd prototype.html shot.png`. The first .html or .md file is the primary; the page shows a tab per file.",
+      "Split only when each file earns its tab: one plan, then the things a reader needs to see or try. At most 12.",
+      "Kinds: html (the human can switch to Interact mode and use it), markdown (mermaid code blocks are drawn), mermaid (.mmd), image, text (.txt .log .json .csv).",
+      "Everything renders locally: don't load scripts or fonts from a CDN.",
+      "Poll the primary. Each prompt's `output.file` says which file it is about, and its `target` can give a line, row, diagram node, or image region (x, y, w, h in percent). Edit only that file; each file live-reloads on its own.",
+      "Use `see-plan add` when a new file comes up mid-review.",
+    ].join("\n"),
+  },
+  {
     id: "verification",
     use_when: "Verification stage: checking the build against the requirements",
     guidance: [
@@ -110,6 +122,8 @@ export const PLAYBOOKS = [
 
 export const HOME_USAGE = [
   "see-plan <file.html|file.md>  open the plan in the browser (--with-claude also starts Claude in a new terminal; --stage <name>)",
+  "see-plan open <file> <file...>  one review with a tab per file: .html .md .mmd, images, .txt .log .json .csv",
+  "see-plan add <primary> <file...>  add outputs to a running review; see-plan remove <primary> <output-id> takes one out",
   "see-plan poll <file>          wait for the human's feedback; agent polls return about every 1:50, run again (--agent-reply, --agent-reply-file, --timeout-ms, --claude-session, --agent)",
   "see-plan reply <file>         post a chat reply without polling (--agent-reply)",
   "see-plan end <file>           end the session",
@@ -119,7 +133,7 @@ export const HOME_USAGE = [
   "see-plan feature status <name>  stages, current stage, next_step",
   "see-plan prune                remove sessions whose file is gone (--dry-run)",
   "see-plan design               page design rules",
-  "see-plan playbook [id]        page recipes: plan, diagram, table, comparison, input, interrogation, progress, verification",
+  "see-plan playbook [id]        page recipes: plan, diagram, table, comparison, input, interrogation, progress, verification, multi",
   "see-plan logs                 open the newest Claude session's log in the browser",
   "see-plan error-logs           open the error log tabs: in a project, session and plan errors, its superpowers plans and sessions; elsewhere, recent sessions only (--dir, --no-open)",
   "see-plan paths                every folder and file see-plan uses (state, error log, logs, runtime) and why (--json)",

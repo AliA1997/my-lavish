@@ -55,7 +55,7 @@ test("poll output next_step variants", () => {
 test("playbook listing and unknown id", async () => {
   const a = fakeIo();
   assert.equal(await run(["playbook"], a.io), 0);
-  assert.match(a.stdout(), /playbooks\[8\]\{id,use_when\}:/);
+  assert.match(a.stdout(), /playbooks\[9\]\{id,use_when\}:/);
   const b = fakeIo();
   assert.equal(await run(["playbook", "nope"], b.io), 1);
   assert.match(b.stdout(), /NOT_FOUND/);

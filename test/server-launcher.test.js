@@ -50,10 +50,15 @@ test("no shell strings: a path with spaces, quotes and $() stays one argv item o
 
   const win = buildServerLaunch({ mode: "window", platform: "win32", exe: "C:\\Program Files\\it's $(calc)\\node.exe", args, env: { A: "1" }, port: 1 });
   assert.match(win.command, /powershell\.exe$/i);
-  const ps = Buffer.from(win.args.at(-1), "base64").toString("utf16le");
-  assert.ok(!ps.includes("calc") && ps.includes("$env:SEE_PLAN_SERVER_EXE") && ps.includes("Read-Host"));
+  const utf16 = (b64) => Buffer.from(b64, "base64").toString("utf16le");
+  const outer = utf16(win.args.at(-1));
+  assert.match(outer, /^Start-Process /, "Start-Process makes the visible console");
+  const ps = utf16(/-EncodedCommand ([A-Za-z0-9+/=]+)/.exec(outer)[1]);
+  assert.ok(!outer.includes("calc") && !ps.includes("calc") && ps.includes("$env:SEE_PLAN_SERVER_EXE") && ps.includes("Read-Host"));
+  assert.ok(ps.includes("ConvertFrom-Json | ForEach-Object"), "PowerShell 5.1 must not pass the array as one argument");
   assert.deepEqual(JSON.parse(win.env.SEE_PLAN_SERVER_ARGS), args);
-  assert.equal(win.options.detached, true, "detached gives the server its own console window");
+  assert.equal(win.options.detached, undefined, "DETACHED_PROCESS would have no console: Start-Process makes the window");
+  assert.equal(win.options.windowsHide, true);
   assert.equal(win.env.SEE_PLAN_TITLE, "see-plan server · :1");
 
   const tmux = buildServerLaunch({ mode: "tmux", platform: "linux", exe: HOSTILE, args, env: {}, port: 1, environment: { tmux: true, tmux_socket: "/tmp/t" } });

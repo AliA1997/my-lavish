@@ -15,9 +15,10 @@ import { createErrorsHtml } from "./errors-page.js";
 import { isSeverity, needsReason, SEVERITIES } from "./severity.js";
 import { serializeChat } from "./markdown.js";
 import { sessionKey, StoreError } from "./session-store.js";
-import { ensurePlanHtml, htmlPathFor, isMarkdownPath } from "./plan-markdown.js";
+import { ensurePlanHtml, htmlPathFor, isMarkdownPath, renderPlanHtml } from "./plan-markdown.js";
 import { CATEGORY_TITLES, SESSION_FEEDBACK_CATEGORIES, STAGES, STAGE_TITLES, effectiveStage, inferStageFromText, isStage, nextStage, stageInstructions } from "./stages.js";
-import { listRevisions, readRevision, saveRevision } from "./revisions.js";
+import { listOutputRevisions, listRevisions, readOutputRevision, readRevision, saveOutputRevision, saveRevision } from "./revisions.js";
+import { getOutput, imageType, kindOf, maxBytesFor, outputsOf, placeholderPage, promptOutput, renderOutputPage, withMermaid } from "./outputs.js";
 import { appendFeedback } from "./feedback-log.js";
 import {
   advanceWorkflow, createWorkflow, ensureStageFile, getWorkflow, isFeatureName, listWorkflows, reopenStage,
@@ -41,7 +42,7 @@ const CONNECT_COOLDOWN_MS = 60000;
 export const AGENT_POLL_MS = 110000; // under Claude Code's default 120 s Bash timeout
 const PRESENCE_GRACE_MS = 20000; // a re-poll within this window is invisible to the user
 const LAUNCH_ERROR_STATUS = { UNSUPPORTED_PLATFORM: 501, CLAUDE_NOT_FOUND: 424, LAUNCHER_OFF: 409 };
-const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409, UNSENT_NOTES: 409, NOT_CURRENT: 409 };
+const STORE_ERROR_STATUS = { MISSING: 404, ENDED: 409, NOT_ENDED: 409, UNSENT_NOTES: 409, NOT_CURRENT: 409, OUTPUT_IN_OTHER_SESSION: 409 };
 const MAX_FEEDBACK_TEXT = 4000;
 const LOG_ROLES = new Set(["user", "assistant"]);
 const LOG_KINDS = new Set(["text", "tool_use", "tool_result"]);
@@ -392,7 +393,7 @@ export function createServer({
       onError: (e) => log(`watcher error for ${key}: ${e?.message ?? e}`),
     });
     watchers.set(key, watcher);
-    const ready = [watcher.ready];
+    const ready = [watcher.ready, ...(session.outputs ?? []).map((o) => watchOutput(key, o))];
     // A Markdown plan: editing the .md regenerates the html, which the watcher above then reloads.
     if (session.source_file && htmlPathFor(session.source_file) === session.file) {
       const md = watchArtifact(session.source_file, {
@@ -407,6 +408,28 @@ export function createServer({
     }
     return Promise.all(ready);
   }
+
+  // M5: one watcher per added output. A Markdown output regenerates its html first.
+  function watchOutput(key, output) {
+    const name = `${key}:o:${output.id}`;
+    if (closing || watchers.has(name)) return Promise.resolve();
+    const watcher = watchArtifact(output.file, {
+      onChange: () => {
+        if (closing) return;
+        track((async () => {
+          if (output.kind === "markdown") await ensurePlanHtml(output.file);
+          const revision = await store.bumpOutputRevision(key, output.id);
+          await saveOutputRevision(stateDir, key, output.id, revision, output.file);
+          broadcast(key, { type: "reload", output: output.id, revision });
+        })().catch((e) => log(`output update failed for ${name}: ${e?.message ?? e}`)));
+      },
+      onError: (e) => log(`watcher error for ${name}: ${e?.message ?? e}`),
+    });
+    watchers.set(name, watcher);
+    return watcher.ready;
+  }
+
+  const outputsView = (session) => outputsOf(session).map((o) => ({ id: o.id, file: o.file, kind: o.kind, revision: o.revision ?? 0 }));
 
   app.disable("x-powered-by");
 
@@ -531,6 +554,10 @@ export function createServer({
           return res.status(400).json(errorBody("VALIDATION_ERROR", e instanceof StoreError ? e.message : "source_file not found"));
         }
       }
+      const holder = await store.findOutputOwner(source ?? real);
+      if (holder && holder.file !== real) {
+        return res.status(409).json(errorBody("OUTPUT_IN_OTHER_SESSION", `${source ?? real} is already an output of another review. Run see-plan poll on it to join that review.`));
+      }
       let result;
       try {
         result = await openReviewSession(real, { reopen: Boolean(reopen), source_file: source, stage });
@@ -539,7 +566,7 @@ export function createServer({
       }
       const { status, session } = result;
       rememberEnv(session.key, req);
-      res.json({ status, key: session.key, url: session.url, stage: session.stage ?? null, stage_source: session.stage_source ?? null });
+      res.json({ status, key: session.key, url: session.url, stage: session.stage ?? null, stage_source: session.stage_source ?? null, outputs: outputsView(session) });
     } catch (e) {
       next(e);
     }
@@ -834,6 +861,77 @@ export function createServer({
     next();
   });
 
+  // M2: which live session holds this file, primary or added output.
+  app.get("/api/outputs/owner", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      if (typeof req.query.file !== "string" || !req.query.file) return res.status(400).json(errorBody("VALIDATION_ERROR", "file is required"));
+      const owner = await store.findOutputOwner(req.query.file);
+      res.json(owner ? { key: owner.key, file: owner.file, source_file: owner.source_file ?? null } : { key: null });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post("/api/:key/outputs", async (req, res, next) => {
+    try {
+      if (isCrossSite(req) || !req.is("application/json")) return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      const { files } = req.body ?? {};
+      if (!Array.isArray(files) || !files.length || !files.every((f) => typeof f === "string" && f)) {
+        return res.status(400).json(errorBody("VALIDATION_ERROR", "files must be a non-empty array of paths"));
+      }
+      const items = [];
+      for (const f of files) {
+        const kind = kindOf(f);
+        if (!kind) return res.status(400).json(errorBody("VALIDATION_ERROR", `see-plan can't show this kind of file: ${f}`));
+        let real;
+        try {
+          real = await canonicalFile(f);
+          if (!(await fs.promises.stat(real)).isFile()) throw new Error("not a file");
+        } catch {
+          return res.status(400).json(errorBody("VALIDATION_ERROR", `File not found: ${f}`));
+        }
+        if (kind === "markdown") await ensurePlanHtml(real);
+        items.push({ file: real, kind });
+      }
+      let result;
+      try {
+        result = await store.addOutputs(req.params.key, items);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      for (const o of result.added) {
+        await saveOutputRevision(stateDir, req.params.key, o.id, 0, o.file).catch(() => {});
+        await watchOutput(req.params.key, o);
+      }
+      const session = await store.getSession(req.params.key);
+      if (result.added.length) broadcast(req.params.key, { type: "outputs", outputs: outputsView(session), added: result.added.map((o) => o.id) });
+      res.json({ outputs: outputsView(session), added: result.added.map((o) => o.id) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.delete("/api/:key/outputs/:id", async (req, res, next) => {
+    try {
+      if (isCrossSite(req)) return res.status(403).json(errorBody("FORBIDDEN_ORIGIN", "Cross-origin request refused"));
+      try {
+        await store.removeOutput(req.params.key, req.params.id);
+      } catch (e) {
+        return sendStoreError(res, e);
+      }
+      const name = `${req.params.key}:o:${req.params.id}`;
+      const w = watchers.get(name);
+      watchers.delete(name);
+      await w?.close();
+      const session = await store.getSession(req.params.key);
+      broadcast(req.params.key, { type: "outputs", outputs: outputsView(session), removed: req.params.id });
+      res.json({ outputs: outputsView(session) });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   app.post("/api/:key/prompts", async (req, res, next) => {
     try {
       if (!requireSameOrigin(req)) {
@@ -846,10 +944,17 @@ export function createServer({
       if (!valid) {
         return res.status(400).json(errorBody("VALIDATION_ERROR", "prompts must be an array of { prompt_id, prompt }"));
       }
+      // M6: the page names the output; the server fills in what the agent sees, and drops an unknown id.
+      const owner = await store.getSession(key);
+      const tagged = prompts.map((p) => {
+        const { output, ...rest } = p;
+        const view = owner ? promptOutput(owner, output) : undefined;
+        return view ? { ...rest, output: view } : rest;
+      });
       let accepted;
       try {
         ({ accepted } = await store.queuePrompts(key, {
-          prompts,
+          prompts: tagged,
           dom_snapshot: typeof dom_snapshot === "string" ? dom_snapshot : "",
           end: Boolean(end),
         }));
@@ -1204,6 +1309,15 @@ export function createServer({
     }
   });
 
+  async function outputRevisionHtml(session, output, n) {
+    const buf = await readOutputRevision(stateDir, session.key, output.id, n);
+    if (!buf) return null;
+    if (output.kind === "html") return buf.toString("utf8");
+    if (output.kind === "markdown") return withMermaid(renderPlanHtml(buf.toString("utf8"), { title: path.parse(output.file).name }));
+    if (output.kind === "image") return renderOutputPage({ kind: "image", file: output.file, imageSrc: `data:${imageType(output.file)};base64,${buf.toString("base64")}` });
+    return renderOutputPage({ kind: output.kind, file: output.file, text: buf.toString("utf8") });
+  }
+
   app.get("/api/:key/revisions", async (req, res, next) => {
     try {
       if (isCrossSite(req)) {
@@ -1211,6 +1325,12 @@ export function createServer({
       }
       const s = await store.getSession(req.params.key);
       if (!s) return res.status(404).json(errorBody("MISSING", `no session ${req.params.key}`));
+      const outputId = typeof req.query.output === "string" && req.query.output !== "main" ? req.query.output : null;
+      if (outputId) {
+        const o = getOutput(s, outputId);
+        if (!o) return res.status(404).json(errorBody("MISSING", `no output ${outputId}`));
+        return res.json({ revision: o.revision ?? 0, revisions: await listOutputRevisions(stateDir, s.key, o.id) });
+      }
       res.json({ revision: s.revision, revisions: await listRevisions(stateDir, s.key) });
     } catch (e) {
       next(e);
@@ -1224,7 +1344,12 @@ export function createServer({
       }
       const s = await store.getSession(req.params.key);
       if (!s) return res.status(404).json(errorBody("MISSING", `no session ${req.params.key}`));
-      const html = await readRevision(stateDir, s.key, Number(req.params.n));
+      const outputId = typeof req.query.output === "string" && req.query.output !== "main" ? req.query.output : null;
+      const o = outputId ? getOutput(s, outputId) : null;
+      if (outputId && !o) return res.status(404).json(errorBody("MISSING", `no output ${outputId}`));
+      const html = o
+        ? await outputRevisionHtml(s, o, Number(req.params.n))
+        : await readRevision(stateDir, s.key, Number(req.params.n));
       if (html === null) return res.status(404).json(errorBody("NOT_FOUND", "No such revision"));
       res.set("Cache-Control", "no-cache");
       res.json({ n: Number(req.params.n), html });
@@ -1667,7 +1792,9 @@ export function createServer({
     }
     let key;
     try {
-      key = sessionKey(await canonicalFile(file));
+      const real = await canonicalFile(file);
+      // M2: polling any output of a review waits on that review.
+      key = (await store.findOutputOwner(real))?.key ?? sessionKey(real);
     } catch {
       return res.status(404).json({ status: "missing" });
     }
@@ -1857,7 +1984,83 @@ export function createServer({
       }
       res.set("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'self'");
       res.set("Cache-Control", "no-cache");
-      res.type("html").send(injectSdk(html, session.key, session.revision));
+      res.type("html").send(injectSdk(withMermaid(html), session.key, session.revision));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // ---- M3: added outputs, under the same capability ----
+
+  const FRAME_CSP = "sandbox allow-scripts allow-forms allow-popups; frame-ancestors 'self'";
+  async function outputFor(req, res) {
+    if (!capOk(req)) {
+      res.status(404).json(errorBody("NOT_FOUND", "Unknown artifact"));
+      return null;
+    }
+    const session = await store.getSession(req.params.key);
+    const output = session && getOutput(session, req.params.id);
+    if (!output || output.primary) {
+      res.status(404).json(errorBody("NOT_FOUND", "No such output"));
+      return null;
+    }
+    return { session, output };
+  }
+
+  app.get("/artifact/:key/:cap/o/:id/index.html", async (req, res, next) => {
+    try {
+      const found = await outputFor(req, res);
+      if (!found) return;
+      const { session, output } = found;
+      const servedFile = output.kind === "markdown" ? htmlPathFor(output.file) : output.file;
+      const stat = await fs.promises.stat(servedFile).catch(() => null);
+      if (!stat?.isFile()) return res.status(404).json(errorBody("NOT_FOUND", "Output file missing"));
+      res.set("Content-Security-Policy", FRAME_CSP);
+      res.set("Cache-Control", "no-cache");
+      let html;
+      const limit = maxBytesFor(output.kind);
+      if (stat.size > limit) html = placeholderPage(output.file, stat.size, limit);
+      else if (output.kind === "image") html = renderOutputPage({ kind: "image", file: output.file, imageSrc: "__raw" });
+      else {
+        const text = await fs.promises.readFile(servedFile, "utf8");
+        html = output.kind === "html" || output.kind === "markdown" ? withMermaid(text) : renderOutputPage({ kind: output.kind, file: output.file, text });
+      }
+      res.type("html").send(injectSdk(html, session.key, output.revision ?? 0));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // An image's bytes. The sandbox header applies even if an SVG is opened directly, so its scripts get no origin.
+  app.get("/artifact/:key/:cap/o/:id/__raw", async (req, res, next) => {
+    try {
+      const found = await outputFor(req, res);
+      if (!found) return;
+      if (found.output.kind !== "image") return res.status(404).json(errorBody("NOT_FOUND", "No such asset"));
+      const stat = await fs.promises.stat(found.output.file).catch(() => null);
+      if (!stat?.isFile() || stat.size > maxBytesFor("image")) return res.status(404).json(errorBody("NOT_FOUND", "No such asset"));
+      res.set("Content-Security-Policy", `${FRAME_CSP}; script-src 'none'`);
+      res.set("Cache-Control", "no-cache");
+      res.type(imageType(found.output.file)).send(await fs.promises.readFile(found.output.file));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Relative assets of an added html/Markdown output resolve next to that file.
+  app.get("/artifact/:key/:cap/o/:id/*splat", async (req, res, next) => {
+    try {
+      const found = await outputFor(req, res);
+      if (!found) return;
+      const rel = [].concat(req.params.splat).join("/");
+      const real = await resolveArtifactAsset(path.dirname(found.output.file), rel);
+      const stat = real && (await fs.promises.stat(real).catch(() => null));
+      if (!stat || !stat.isFile()) return res.status(404).json(errorBody("NOT_FOUND", "No such asset"));
+      res.set("Content-Security-Policy", FRAME_CSP);
+      res.set("Cache-Control", "no-cache");
+      res.sendFile(real, { dotfiles: "allow" }, (err) => {
+        if (err && !res.headersSent) next(err);
+      });
     } catch (e) {
       next(e);
     }

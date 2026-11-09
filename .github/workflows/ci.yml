@@ -28,6 +28,24 @@ jobs:
       - run: npm run smoke
       - run: npm run smoke:workflow
 
+  # 3.7: a container has no display: no window, no browser, and Connect Claude falls back to a command to copy.
+  headless:
+    runs-on: ubuntu-latest
+    container: node:22
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - run: npm ci
+      - run: npm run smoke
+      - name: Check the headless behaviour
+        run: |
+          unset CI DISPLAY WAYLAND_DISPLAY
+          export MY_LAVISH_STATE_DIR="$(mktemp -d)"
+          out="$(node bin/see-plan.js open examples/plan.html --json)"
+          echo "$out"
+          echo "$out" | grep -q '"opened": false'
+          echo "$out" | grep -q '"mode": "hidden"'
+          node bin/see-plan.js stop
+
   executable:
     runs-on: windows-latest
     steps:

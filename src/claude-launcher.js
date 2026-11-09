@@ -23,6 +23,17 @@ const OSA_LINES = (flag, sessionId) => [
   'tell application "Terminal" to activate',
 ];
 
+/**
+ * Args that open `script` in a new visible console. Node's `detached` on Windows means DETACHED_PROCESS, which
+ * has no console at all, so a hidden PowerShell asks Start-Process for one. Both scripts are constants or a
+ * validated UUID; values travel in env vars, which the new window inherits.
+ */
+export function windowsConsoleArgs(script, { noExit = false } = {}) {
+  const inner = `${noExit ? "-NoExit " : ""}-NoLogo -NoProfile -EncodedCommand ${Buffer.from(script, "utf16le").toString("base64")}`;
+  const outer = `Start-Process -FilePath '${POWERSHELL_PATH.replace(/'/g, "''")}' -ArgumentList '${inner}'`;
+  return ["-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", Buffer.from(outer, "utf16le").toString("base64")];
+}
+
 function launchError(code, message) {
   const err = new Error(message);
   err.code = code;
@@ -76,7 +87,7 @@ export function buildClaudeLaunch({ file, sessionId, claudePath, env = process.e
   if (platform === "win32") {
     return {
       command: POWERSHELL_PATH,
-      args: ["-NoExit", "-EncodedCommand", Buffer.from(SCRIPT(flag, sessionId), "utf16le").toString("base64")],
+      args: windowsConsoleArgs(SCRIPT(flag, sessionId), { noExit: true }),
       env: { ...env, SEE_PLAN_CLAUDE: claudePath, SEE_PLAN_PROMPT: text },
     };
   }
@@ -291,7 +302,7 @@ export async function launchClaude(
     built = buildClaudeLaunch({ file, sessionId, claudePath, platform, resume, cwd, terminal, prompt: text });
     if (built.copy) return copy("no terminal program was found");
   }
-  const child = spawnFn(built.command, built.args, { cwd, env: built.env, detached: true, stdio: "ignore" });
+  const child = spawnFn(built.command, built.args, { cwd, env: built.env, stdio: "ignore", ...(platform === "win32" ? { windowsHide: true } : { detached: true }) });
   child.on?.("error", () => {});
   child.unref?.();
   return { mode: platform === "win32" ? "powershell" : platform === "darwin" ? "osascript" : "terminal", strategy: "terminal", strategy_reasons: reasons };

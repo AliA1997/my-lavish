@@ -21,7 +21,10 @@ test("readAsset reads public files from disk, or from the SEA blob", () => {
 });
 
 test("every public file is a served asset", () => {
-  const onDisk = fs.readdirSync(path.join(ROOT, "public")).sort();
+  const onDisk = fs.readdirSync(path.join(ROOT, "public"), { recursive: true, withFileTypes: true })
+    .filter((d) => d.isFile())
+    .map((d) => path.relative(path.join(ROOT, "public"), path.join(d.parentPath, d.name)).split(path.sep).join("/"))
+    .sort();
   assert.deepEqual([...PUBLIC_ASSETS].sort(), onDisk);
 });
 

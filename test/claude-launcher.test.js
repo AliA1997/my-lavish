@@ -18,11 +18,14 @@ import {
 const ID = "1b4e28ba-2fa1-11d2-883f-0016d3cca427";
 const SCRIPT = `& $env:SEE_PLAN_CLAUDE --session-id ${ID} $env:SEE_PLAN_PROMPT`;
 const decode = (b64) => Buffer.from(b64, "base64").toString("utf16le");
+/** The script that runs in the new console: the launcher's Start-Process carries it as a second -EncodedCommand. */
+const inner = (args) => decode(/-EncodedCommand ([A-Za-z0-9+/=]+)/.exec(decode(args.at(-1)))[1]);
 
 test("buildClaudeLaunch encodes the claude command", () => {
   const l = buildClaudeLaunch({ file: "C:\\p\\plan.md", sessionId: ID, claudePath: "C:\\bin\\claude.exe", env: {} });
-  assert.deepEqual(l.args.slice(0, 2), ["-NoExit", "-EncodedCommand"]);
-  assert.equal(decode(l.args[2]), SCRIPT);
+  assert.deepEqual(l.args.slice(-2, -1), ["-EncodedCommand"]);
+  assert.match(decode(l.args.at(-1)), /Start-Process .*-NoExit /, "a new console that stays open");
+  assert.equal(inner(l.args), SCRIPT);
   if (process.platform === "win32") assert.ok(path.isAbsolute(l.command)); // a Windows path is only absolute on Windows
   assert.match(l.command, /System32[\\/]WindowsPowerShell[\\/]v1\.0[\\/]powershell\.exe$/);
   assert.equal(l.env.SEE_PLAN_CLAUDE, "C:\\bin\\claude.exe");
@@ -32,7 +35,7 @@ test("buildClaudeLaunch encodes the claude command", () => {
 test("buildClaudeLaunch keeps paths out of the script", () => {
   const file = "C:\\O'Brien\\x\u2019; calc; \u2019\\$(calc)\\p.md";
   const l = buildClaudeLaunch({ file, sessionId: ID, claudePath: "C:\\c.exe", env: {} });
-  assert.equal(decode(l.args[2]), SCRIPT);
+  assert.equal(inner(l.args), SCRIPT);
   assert.ok(l.env.SEE_PLAN_PROMPT.includes(file));
 });
 
@@ -121,7 +124,7 @@ test("Linux picks the first terminal, or falls back to a copy command", async ()
 
 test("resume uses --resume with the validated id", async () => {
   const l = buildClaudeLaunch({ file: "f", sessionId: ID, claudePath: "c", env: {}, resume: true });
-  assert.equal(decode(l.args[2]), `& $env:SEE_PLAN_CLAUDE --resume ${ID} $env:SEE_PLAN_PROMPT`);
+  assert.equal(inner(l.args), `& $env:SEE_PLAN_CLAUDE --resume ${ID} $env:SEE_PLAN_PROMPT`);
   assert.throws(() => buildClaudeLaunch({ file: "f", sessionId: "--x", claudePath: "c", resume: true }), { code: "VALIDATION_ERROR" });
 });
 
@@ -155,7 +158,7 @@ test("launchClaude spawns detached powershell", async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, POWERSHELL_PATH);
   assert.equal(calls[0].opts.cwd, "C:\\p");
-  assert.equal(calls[0].opts.detached, true);
+  assert.equal(calls[0].opts.windowsHide, true, "DETACHED_PROCESS would have no console");
   assert.equal(calls[0].opts.stdio, "ignore");
   assert.equal(calls[0].opts.env.SEE_PLAN_CLAUDE, "C:\\c\\claude.exe");
   assert.ok(!calls[0].args.some((a) => /dangerously/.test(a)));

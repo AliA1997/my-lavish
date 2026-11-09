@@ -13,6 +13,7 @@ Use see-plan when the user should review something visually and send feedback: a
 4. After applying feedback, poll with `--agent-reply "<short summary>"`.
 5. If a permission prompt asks about `see-plan`, ask the user to allow `Bash(see-plan:*)` once (in `.claude/settings.json` under `permissions.allow`).
 6. Use `see-plan status <file>` for a read-only check. It never takes feedback.
+7. To review several files at once, run `see-plan open plan.md flow.mmd prototype.html` (`see-plan playbook multi`). Each prompt's `output.file` names the file it refers to.
 
 ## Logged errors
 

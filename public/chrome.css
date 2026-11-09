@@ -295,6 +295,15 @@ body {
   font-weight: 600;
 }
 
+#outputTabs { display: flex; gap: 2px; overflow-x: auto; padding: 4px 8px 0; background: #eef0f2; flex: none; }
+#outputTabs[hidden] { display: none; }
+.output-tab { border: 1px solid transparent; border-bottom: 0; border-radius: 6px 6px 0 0; background: transparent; padding: 6px 12px; font: inherit; white-space: nowrap; cursor: pointer; color: inherit; }
+.output-tab[aria-selected="true"] { background: #fff; border-color: #c8ccd0; font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  #outputTabs { background: #1f2328; }
+  .output-tab[aria-selected="true"] { background: #2b3036; border-color: #444b53; }
+}
+
 #composer #annotateToggle[aria-pressed="true"] {
   border-color: var(--accent);
   color: var(--accent);

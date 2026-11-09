@@ -110,6 +110,21 @@ function icacls(file, { execFileFn = execFile, user = os.userInfo().username } =
   });
 }
 
+/** Windows refuses to rename over a file another process has open (a CLI reading it); that clears in moments. */
+async function renameWithRetry(from, to, tries = 40) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fs.promises.rename(from, to);
+    } catch (e) {
+      if (i >= tries || !["EPERM", "EACCES", "EBUSY"].includes(e.code)) {
+        await fs.promises.rm(from, { force: true }).catch(() => {});
+        throw e;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+}
+
 /**
  * Writes the runtime file atomically (temp file + rename) with mode 0600 in a 0700 folder on POSIX (T2).
  * On Windows the file also gets a user-only ACL through icacls (Q3); a failure is returned as a warning.
@@ -122,7 +137,7 @@ export async function writeRuntimeFile(dir, data, { platform = process.platform,
   await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   let warning = null;
   if (platform === "win32") warning = await icacls(tmp, { execFileFn });
-  await fs.promises.rename(tmp, file);
+  await renameWithRetry(tmp, file);
   return { file, warning };
 }
 

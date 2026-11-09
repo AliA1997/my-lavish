@@ -262,6 +262,8 @@ None are required; the defaults work out of the box. Set them only to change the
 | `MY_LAVISH_LAUNCHER` | `auto` | `auto`, `terminal`, `tmux`, `copy` or `off`: how Connect Claude starts Claude |
 | `MY_LAVISH_TERMINAL` | unset | A JSON argv array for your terminal, such as `["wezterm","start","--","{cmd...}"]` |
 | `MY_LAVISH_ALLOWED_HOSTS` | unset | Extra exact host names for a port forwarder. The token is still required |
+| `USE_ERROR_SEARCH` | unset | `true` turns on `see-plan errors similar` and `errors store` (experimental) |
+| `USE_PINECONE` | unset | `true`, with `PINECONE_API_KEY` set, stores errors in Pinecone instead of the local file and turns on error search (experimental). Error text leaves this machine |
 | `MY_LAVISH_NO_OPEN` | unset | `1` = never launch a browser (same as `--no-open`) |
 | `MY_LAVISH_IDLE_TIMEOUT_MS` | `1800000` | Server exits after this long with no WebSocket or poll connections; `0` or `off` disables |
 | `MY_LAVISH_ERROR_LOG` | `<data dir>/error-log.json` | Where the server writes logged errors (wins over `MY_LAVISH_DATA_DIR`) |

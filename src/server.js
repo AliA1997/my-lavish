@@ -10,7 +10,8 @@ import { assertHtmlFile, canonicalFile, resolveArtifactAsset } from "./artifact-
 import { injectSdk } from "./html-transform.js";
 import { createChromeHtml } from "./chrome-page.js";
 import { createLogsHtml } from "./logs-page.js";
-import { appendErrorLog, ErrorLogError, errorLogSize, getErrorRecord, listErrorRecords, rateErrorRecord, reportedRecords, summarizeErrorRecords } from "./error-log.js";
+import { ErrorLogError } from "./error-log.js";
+import { LocalErrorStore } from "./error-store.js";
 import { createErrorsHtml } from "./errors-page.js";
 import { isSeverity, needsReason, SEVERITIES } from "./severity.js";
 import { serializeChat } from "./markdown.js";
@@ -55,6 +56,7 @@ const PAGE_MIN_ENTRIES = 200; // ...until it holds this many entries (screenshot
 const ERROR_CONTEXTS = ["session", "plan"];
 const SEVERITY_FILTERS = [...SEVERITIES, "unrated"];
 const ERROR_PREVIEW_CHARS = 500;
+const MAX_SIMILAR_QUERY = 4000;
 const ERROR_LOG_STATUS = { MISSING: 404, ALREADY_RATED: 409, VALIDATION_ERROR: 400, ERROR_LOG_UNREADABLE: 409 };
 
 /** limit/offset: rounded down, clamped to [min, max]; the default when missing or not a number. */
@@ -141,6 +143,8 @@ export function createServer({
   claudeStatus = realClaudeStatus,
   claudeDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"),
   errorLogFile = resolvePaths().errorLogFile,
+  errorSearch = false, // the USE_ERROR_SEARCH feature flag: /api/errors/similar and /api/errors/store answer 404 while off
+  errorStore = null, // src/error-store.js: Pinecone when USE_PINECONE=true and a key is set (cmdServer decides); else the file
   logDir = null, // shown in the console banner; server.log itself is opened by whoever starts the server
   agentPollMs = AGENT_POLL_MS,
   presenceGraceMs = PRESENCE_GRACE_MS,
@@ -154,6 +158,8 @@ export function createServer({
   idleWarnings = false, // S4: log the idle countdown at 5 min and 1 min (the server window shows it)
 }) {
   let cancelIdleWarnings = null;
+  const errors = errorStore ?? new LocalErrorStore(errorLogFile);
+  const errorLogLabel = errors.label; // what the pages and the API name as "the error log"
   const clientEnvs = new Map(); // key -> the newest caller's environment (H2), in memory only
   /** H2: keeps the newest valid X-See-Plan-Env per session (size-capped and schema-checked; never in state.json). */
   function rememberEnv(key, req) {
@@ -305,7 +311,7 @@ export function createServer({
 
   async function errorSummary(lookup) {
     try {
-      return await summarizeErrorRecords(errorLogFile, lookup.byClaude);
+      return await errors.summarize(lookup.byClaude);
     } catch (e) {
       if (!(e instanceof ErrorLogError)) throw e;
       return { counts: null, bySession: new Map(), byReview: new Map(), unreadable: e.message };
@@ -648,7 +654,7 @@ export function createServer({
       const lookup = await classificationLookup();
       let page;
       try {
-        page = await listErrorRecords(errorLogFile, { context, severity, limit, offset }, lookup.byClaude);
+        page = await errors.list({ context, severity, limit, offset }, lookup.byClaude);
       } catch (e) {
         return sendErrorLogError(res, e);
       }
@@ -667,7 +673,7 @@ export function createServer({
       const lookup = await classificationLookup();
       let record;
       try {
-        record = await getErrorRecord(errorLogFile, ref, lookup.byClaude);
+        record = await errors.get(ref, lookup.byClaude);
       } catch (e) {
         return sendErrorLogError(res, e);
       }
@@ -686,13 +692,59 @@ export function createServer({
       const lookup = await classificationLookup();
       let summary;
       try {
-        summary = await summarizeErrorRecords(errorLogFile, lookup.byClaude);
+        summary = await errors.summarize(lookup.byClaude);
       } catch (e) {
         return sendErrorLogError(res, e);
       }
       const project = await projectFor(req.query.project);
       const plans = project ? (await listSuperpowersPlans(project.root)).total : null;
-      res.json({ counts: summary.counts, plans, project: project ? projectView(project) : null, error_log: errorLogFile });
+      res.json({ counts: summary.counts, plans, project: project ? projectView(project) : null, error_log: errors.where, error_store: errors.kind });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Past errors like a piece of text (for agents: "has this gone wrong before?"). Pinecone matches by meaning;
+  // the local store, and Pinecone when offline, match by shared words (src/vector-cache.js).
+  const searchOff = (res) => res.status(404).json(errorBody("FEATURE_OFF", "Error search is off. Set USE_ERROR_SEARCH=true, then run see-plan stop so the next command restarts the server."));
+
+  app.get("/api/errors/similar", async (req, res, next) => {
+    try {
+      if (refusedCrossSite(req, res)) return;
+      if (!errorSearch) return searchOff(res);
+      const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+      if (!q) return res.status(400).json(errorBody("VALIDATION_ERROR", "q (the text to match) is required"));
+      if (q.length > MAX_SIMILAR_QUERY) return res.status(400).json(errorBody("VALIDATION_ERROR", `q must be at most ${MAX_SIMILAR_QUERY} characters`));
+      const context = enumParam(req.query.context, ERROR_CONTEXTS);
+      const severity = enumParam(req.query.severity, SEVERITY_FILTERS);
+      if (context === null) return res.status(400).json(errorBody("VALIDATION_ERROR", `context must be one of ${ERROR_CONTEXTS.join(", ")}`));
+      if (severity === null) return res.status(400).json(errorBody("VALIDATION_ERROR", `severity must be one of ${SEVERITY_FILTERS.join(", ")}`));
+      const limit = intParam(req.query.limit, 5, 1, 50);
+      touchIdle();
+      const lookup = await classificationLookup();
+      let found;
+      try {
+        found = await errors.similar(q, { limit, context, severity }, lookup.byClaude);
+      } catch (e) {
+        return sendErrorLogError(res, e);
+      }
+      const titles = await titlesFor(found.matches.map((m) => m.record.claude_session_id));
+      res.json({
+        engine: found.engine,
+        ...(found.fallback ? { fallback: found.fallback } : {}),
+        matches: found.matches.map((m) => ({ score: m.score, ...errorItem(m.record, lookup, titles) })),
+        error_store: errors.kind,
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get("/api/errors/store", async (req, res, next) => {
+    try {
+      if (refusedCrossSite(req, res)) return;
+      if (!errorSearch) return searchOff(res);
+      res.json({ store: await errors.describe() });
     } catch (e) {
       next(e);
     }
@@ -718,7 +770,7 @@ export function createServer({
       }
       let rated;
       try {
-        rated = await rateErrorRecord(errorLogFile, ref, body.severity, reason);
+        rated = await errors.rate(ref, body.severity, reason);
       } catch (e) {
         return sendErrorLogError(res, e);
       }
@@ -1652,7 +1704,7 @@ export function createServer({
       if (after === undefined) {
         // First read: the header needs the last prompt even when it is older than the tail window.
         if (!body.last_prompt_at) body.last_prompt_at = await findLastPromptAt(file, read.next);
-        const saved = await reportedRecords(errorLogFile, id); // and the page marks entries already logged
+        const saved = await errors.reported(id); // and the page marks entries already logged
         body.reported = saved.refs;
         body.reasons = saved.reasons;
         body.severities = saved.severities;
@@ -1712,7 +1764,7 @@ export function createServer({
       };
       let result;
       try {
-        result = await appendErrorLog(errorLogFile, record);
+        result = await errors.append(record);
       } catch (err) {
         if (!(err instanceof ErrorLogError)) throw err;
         return res.status(409).json(errorBody(err.code, err.message));
@@ -1723,7 +1775,7 @@ export function createServer({
         duplicate: result.duplicate,
         reason: result.reason, // on a duplicate, the reason saved the first time
         severity: result.severity, // ...and the severity saved the first time
-        error_log: errorLogFile,
+        error_log: errors.where,
       });
     } catch (e) {
       next(e);
@@ -1931,7 +1983,7 @@ export function createServer({
       const canResume = isClaudeSessionId(session.claude_session_id)
         && Boolean(await findTranscript(session.claude_session_id, { claudeDir }).catch(() => null));
       const workflow = session.workflow_id ? await getWorkflow(store, session.workflow_id) : null;
-      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow, errorLogFile, artifactBase: `/artifact/${session.key}/${capFor(token, session.key)}` }));
+      res.type("html").send(createChromeHtml(session, { baseUrl, canResume, workflow, errorLogFile: errorLogLabel, artifactBase: `/artifact/${session.key}/${capFor(token, session.key)}` }));
     } catch (e) {
       next(e);
     }
@@ -1948,7 +2000,7 @@ export function createServer({
       res.set("X-Frame-Options", "DENY");
       res.set("Content-Security-Policy", "frame-ancestors 'none'");
       const project = await projectFor(req.query.project);
-      res.type("html").send(createLogsHtml({ baseUrl, projectKey: project?.key ?? null, errorLogFile }));
+      res.type("html").send(createLogsHtml({ baseUrl, projectKey: project?.key ?? null, errorLogFile: errorLogLabel }));
     } catch (e) {
       next(e);
     }
@@ -2205,7 +2257,12 @@ export function createServer({
         pingTimer.unref();
         updateIdle();
         // The log is one JSON array rewritten on each write: past ~1MB it should move to JSONL.
-        track(errorLogSize(errorLogFile).then((size) => log(`error log ${errorLogFile}: ${size} bytes${size > 1024 * 1024 ? " (over 1MB: consider JSONL)" : ""}`), () => {}));
+        track(errors.ready().then(
+          (d) => log(d.kind === "local"
+            ? `error log ${d.where}: ${d.records} records, ${d.bytes} bytes${d.bytes > 1024 * 1024 ? " (over 1MB: consider JSONL)" : ""}`
+            : `error store: ${errors.label}, ${d.records} records (${d.why})${d.pending ? `, ${d.pending} waiting in the outbox` : ""}`),
+          (e) => log(`error store ${errors.where}: ${e.message}`),
+        ));
         resolve({ port: actual, baseUrl });
       });
     });

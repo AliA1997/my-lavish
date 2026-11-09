@@ -13,6 +13,8 @@ export function allowedEnv(env) {
   for (const [k, v] of Object.entries(env)) {
     if (typeof v !== "string") continue;
     if (/^(MY_LAVISH_|XDG_|SEE_PLAN_SERVER_MODE$)/.test(k) || ["CLAUDE_CONFIG_DIR", "HOME", "PATH", "LOCALAPPDATA", "APPDATA"].includes(k)) out[k] = v;
+    // The Pinecone switch and where to find the key; never PINECONE_API_KEY itself (argv is visible in `ps`).
+    if (["USE_PINECONE", "USE_ERROR_SEARCH", "PINECONE_API_KEY_FILE", "PINECONE_INDEX", "PINECONE_NAMESPACE", "SEE_PLAN_REPORTER"].includes(k)) out[k] = v;
   }
   return out;
 }

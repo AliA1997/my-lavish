@@ -8,6 +8,9 @@ The rest of the 2026-11-03 plan (`docs/superpowers/plans/2026-11-03-logs-session
 
 Phases 2-4 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-output.md`.
 
+### Comparison of Old Way with New way of Retrieving Data
+https://claude.ai/artifact/La1WiTETEyNQoZMXMyxjfC
+
 ### Breaking
 - Every API call, page and WebSocket needs the server's token: 3.x CLIs must be upgraded. Browsers sign in through `see-plan url`.
 - Artifact URLs now carry a capability (`/artifact/<key>/<cap>/…`).

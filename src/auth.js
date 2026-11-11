@@ -15,6 +15,33 @@ export function createToken() {
   return crypto.randomBytes(32).toString("base64url");
 }
 
+export const BROWSER_KEY_FILE = "browser-key";
+/** How long a signed-in browser stays signed in, restarts included (30 days). */
+export const COOKIE_MAX_AGE_S = 30 * 24 * 3600;
+
+/**
+ * The browser's long-lived secret: read from `<dir>/browser-key`, or made and saved there (mode 0600, a
+ * user-only ACL on Windows). The cookie is derived from it, so a signed-in browser stays signed in across
+ * server restarts instead of landing on the sign-in screen. The CLI token is still new on every start. If
+ * the file cannot be written, a one-start key is returned and the old behaviour applies.
+ */
+export async function loadBrowserKey(dir, { platform = process.platform, execFileFn } = {}) {
+  const file = path.join(dir, BROWSER_KEY_FILE);
+  try {
+    const v = (await fs.promises.readFile(file, "utf8")).trim();
+    if (/^[A-Za-z0-9_-]{43}$/.test(v)) return v;
+  } catch {}
+  const key = createToken();
+  try {
+    await fs.promises.mkdir(dir, { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+    await fs.promises.writeFile(tmp, key, { mode: 0o600 });
+    if (platform === "win32") await icacls(tmp, { execFileFn });
+    await renameWithRetry(tmp, file);
+  } catch {}
+  return key;
+}
+
 /** Timing-safe string compare. Different lengths are false without comparing contents. */
 export function safeEqual(a, b) {
   if (typeof a !== "string" || typeof b !== "string") return false;

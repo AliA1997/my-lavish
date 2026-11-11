@@ -32,7 +32,8 @@ import { getProject, isProjectKey, listProjects, registerProject } from "./proje
 import { CONTENT_TYPES, PUBLIC_ASSETS, readAsset } from "./assets.js";
 import { createClaudeSessionLister, findLastPromptAt, findTranscript, readTranscript } from "./claude-log.js";
 import { buildPrompt, claudeStatus as realClaudeStatus, findRepoRoot, isClaudeSessionId, launchClaude as realLaunchClaude } from "./claude-launcher.js";
-import { bearerOf, capFor, cookieNameFor, cookieValueFor, createNonceStore, createToken, parseCookies, safeEqual, safeNext } from "./auth.js";
+import { escapeHtml } from "./markdown.js";
+import { COOKIE_MAX_AGE_S, bearerOf, capFor, cookieNameFor, cookieValueFor, createNonceStore, createToken, parseCookies, safeEqual, safeNext } from "./auth.js";
 import { scheduleIdleWarnings } from "./console-log.js";
 import { detectEnvironment, parseEnvHeader } from "./environment.js";
 
@@ -152,6 +153,7 @@ export function createServer({
   claudeSessionTtlMs = 30000,
   projectHome = os.homedir(), // D9: never a project root (tests point it elsewhere)
   token = createToken(), // T2: every API call, page and WebSocket needs it (bearer or cookie); there is no off switch
+  browserKey = token, // the browser cookie is derived from this; the CLI passes a saved one so restarts keep browsers signed in
   allowedHosts = [], // H5: extra exact Host names (port forwarders); only ever added on top of the token check
   nonceTtlMs = 60000,
   launcherConfig = {}, // H3: { launcher, terminal } from MY_LAVISH_LAUNCHER / MY_LAVISH_TERMINAL / config.json
@@ -452,7 +454,7 @@ export function createServer({
 
   // ---- T5: the token (bearer for the CLI, cookie for the browser) ----
   const nonces = createNonceStore({ ttlMs: nonceTtlMs });
-  const cookieValue = cookieValueFor(token);
+  const cookieValue = cookieValueFor(browserKey);
   let boundPort = port;
   const cookieName = () => cookieNameFor(boundPort);
   const hasBearer = (req) => safeEqual(bearerOf(req.headers.authorization) ?? "", token);
@@ -466,11 +468,49 @@ export function createServer({
   }
   const AUTH_MESSAGE = "This see-plan server needs its token. A 3.x see-plan cannot talk to it: upgrade see-plan. In a browser, run `see-plan url` in a terminal to get a sign-in link.";
 
-  function unauthorizedPage() {
-    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in to see-plan</title>
-<style>:root{color-scheme:light dark}body{font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;max-width:36rem;margin:15vh auto;padding:0 16px}code{background:rgba(127,127,127,.15);padding:2px 6px;border-radius:4px}</style></head>
-<body><h1>Sign in to see-plan</h1><p>Run <code>see-plan url</code> in a terminal to get a sign-in link, then open it here.</p>
-<p>A link works once and expires after a minute. Opening a review with <code>see-plan &lt;file&gt;</code> signs you in too.</p></body></html>`;
+  /**
+   * The page a browser without a cookie gets. Left: the most recent session, by file name only (never the
+   * folder path), with whether Claude is connected; it refreshes every 5 s. Right: how to sign in.
+   */
+  async function recentSessionSummary() {
+    try {
+      const all = (await store.listSessions()).map(sessionSummary);
+      all.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+      return all[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function unauthorizedPage(recent = null) {
+    const agent = recent?.agent;
+    const state = agent === "working" ? ["working", "Claude is working"] : agent ? ["on", "Claude is connected"] : ["off", "Claude is not connected"];
+    const name = recent ? escapeHtml(String(recent.file ?? "").split(/[\\/]/).pop() || "session") : "";
+    const stage = recent?.stage ? escapeHtml(recent.stage) : "";
+    const left = recent
+      ? `<h2>Most recent session</h2><p class="file">${name}</p><p class="meta">${stage ? `${stage} stage · ` : ""}${escapeHtml(recent.status === "ended" ? (recent.ended_by === "approved" ? "approved" : "ended") : "open")}</p>
+<p class="agent ${state[0]}"><span class="dot" aria-hidden="true"></span>${state[1]}</p>`
+      : `<h2>Most recent session</h2><p class="meta">No sessions yet. Ask your agent to run <code>see-plan &lt;file&gt;</code>.</p><p class="agent off"><span class="dot" aria-hidden="true"></span>Claude is not connected</p>`;
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="refresh" content="5"><title>Sign in to see-plan</title>
+<style>
+:root{color-scheme:light dark;--bg:#f6f3ee;--surface:#fffdf9;--text:#2b2620;--muted:#776d60;--border:#e2d9cb;--grad:linear-gradient(100deg,#7c4dff,#3b82f6 55%,#14b8a6)}
+@media(prefers-color-scheme:dark){:root{--bg:#181614;--surface:#1f1c19;--text:#ece6dc;--muted:#a69c8e;--border:#3a342d}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{padding:16px 24px;background:var(--grad);color:#fff;font-weight:700;font-size:20px}
+main{display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);gap:24px;max-width:900px;margin:32px auto;padding:0 16px}
+section{padding:18px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}
+h2{margin:0 0 10px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.file{margin:0;font-weight:700;overflow-wrap:anywhere}.meta{margin:2px 0 12px;color:var(--muted);font-size:14px}
+.agent{display:flex;align-items:center;gap:8px;margin:0;font-weight:600}.dot{width:12px;height:12px;border-radius:50%;background:#8a8f98}
+.agent.on .dot{background:#22c55e;box-shadow:0 0 0 4px rgba(34,197,94,.25)}.agent.working .dot{background:#f59e0b;box-shadow:0 0 0 4px rgba(245,158,11,.25)}
+code{background:rgba(127,127,127,.15);padding:2px 6px;border-radius:4px}ol{padding-left:20px}
+@media(max-width:640px){main{grid-template-columns:1fr}}
+</style></head>
+<body><header>see-plan</header><main>
+<section aria-label="Most recent session">${left}</section>
+<section><h2>Sign in</h2><p>This browser is not signed in yet.</p><ol><li>In a terminal, run <code>see-plan url</code>.</li><li>Open the link it prints in this browser.</li></ol>
+<p class="meta">A link works once and expires after a minute. Opening a review with <code>see-plan &lt;file&gt;</code> signs you in too. You stay signed in for 30 days.</p></section>
+</main></body></html>`;
   }
 
   // Host allowlist: blocks DNS rebinding.
@@ -483,12 +523,12 @@ export function createServer({
   });
 
   // Token check, right after the Host allowlist. The Origin checks below stay as defence in depth.
-  app.use((req, res, next) => {
+  app.use(async (req, res, next) => {
     if (authExempt(req) || authed(req)) return next();
     const page = req.method === "GET" && !req.path.startsWith("/api/");
     if (page) {
       res.set("Cache-Control", "no-store");
-      return res.status(401).type("html").send(unauthorizedPage());
+      return res.status(401).type("html").send(unauthorizedPage(await recentSessionSummary()));
     }
     res.status(401).json(errorBody("AUTH_REQUIRED", AUTH_MESSAGE));
   });
@@ -516,14 +556,14 @@ export function createServer({
   });
 
   // ...and the browser trades it for the cookie, then lands on `next` (a same-origin path only).
-  app.get("/auth", (req, res) => {
+  app.get("/auth", async (req, res) => {
     const next = safeNext(req.query.next);
     if (next === null) return res.status(400).json(errorBody("VALIDATION_ERROR", "next must be a same-origin path"));
     res.set("Cache-Control", "no-store");
     res.set("Referrer-Policy", "no-referrer");
-    if (!nonces.consume(req.query.t)) return res.status(401).type("html").send(unauthorizedPage());
+    if (!nonces.consume(req.query.t)) return res.status(401).type("html").send(unauthorizedPage(await recentSessionSummary()));
     const https = req.seePlanForwarded === true && String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim() === "https";
-    res.set("Set-Cookie", `${cookieName()}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/${https ? "; Secure" : ""}`);
+    res.set("Set-Cookie", `${cookieName()}=${cookieValue}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE_S}${https ? "; Secure" : ""}`);
     res.redirect(303, next);
   });
 

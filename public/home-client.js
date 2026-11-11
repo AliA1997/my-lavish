@@ -105,46 +105,66 @@
     });
   }
 
-  function renderSessions() {
-    sessionsEl.textContent = "";
-    var loose = data.sessions.filter(function (s) { return !s.workflow_id; })
-      .sort(function (a, b) { return String(b.updated_at).localeCompare(String(a.updated_at)); });
-    if (!loose.length) {
-      sessionsEl.appendChild(element("p", "empty", "No review sessions. Agents open one with see-plan <file>."));
-      return;
-    }
-    var table = element("table", "sessions");
-    var thead = element("thead");
-    var hr = element("tr");
-    ["File", "Stage", "Status", "Updated", ""].forEach(function (h) { hr.appendChild(element("th", "", h)); });
-    thead.appendChild(hr);
-    table.appendChild(thead);
-    var tbody = element("tbody");
-    loose.forEach(function (s) {
-      var tr = element("tr");
-      var fileCell = element("td");
-      var a = element("a", "", baseName(s.file));
-      a.href = s.url;
-      a.title = s.file;
-      fileCell.appendChild(a);
-      tr.appendChild(fileCell);
-      tr.appendChild(element("td", "", s.stage ? TITLES[s.stage] + (s.stage_source === "human" || s.stage_source === "flag" ? "" : " (inferred)") : "—"));
-      var status = s.status === "ended" ? (s.ended_by === "approved" ? "approved" : "ended") : s.status === "feedback" ? "notes waiting" : "open";
-      var agent = agentLabel(s);
-      tr.appendChild(element("td", "status-" + status.replace(/\s/g, "-"), status + (agent ? " · " + agent : "")));
-      tr.appendChild(element("td", "muted", timeAgo(s.updated_at)));
-      var actionCell = element("td");
+  function featureOf(s) {
+    if (!s.workflow_id) return "";
+    for (var i = 0; i < data.workflows.length; i++) if (data.workflows[i].id === s.workflow_id) return data.workflows[i].name;
+    return "feature";
+  }
+
+  function statusOf(s) {
+    return s.status === "ended" ? (s.ended_by === "approved" ? "approved" : "ended") : s.status === "feedback" ? "notes waiting" : "open";
+  }
+
+  function sessionCard(s, opts) {
+    var card = element("article", "scard status-" + statusOf(s).replace(/\s/g, "-"));
+    var a = element("a", "sname", baseName(s.file));
+    a.href = s.url;
+    a.title = s.file;
+    card.appendChild(a);
+    var meta = element("div", "smeta");
+    meta.appendChild(element("span", "pill pill-" + statusOf(s).replace(/\s/g, "-"), statusOf(s)));
+    var feature = featureOf(s);
+    var stage = s.stage ? TITLES[s.stage] : "";
+    if (feature || stage) meta.appendChild(element("span", "muted", (feature ? feature + " · " : "") + stage));
+    card.appendChild(meta);
+    var foot = element("div", "sfoot");
+    var agent = agentLabel(s);
+    foot.appendChild(element("span", "muted", timeAgo(s.updated_at) + (agent && !opts.history ? " · " + agent : "")));
+    if (!s.workflow_id && !opts.history) {
       var archive = element("button", "link", "Archive");
       archive.type = "button";
       archive.title = "Hide this session from the dashboard (it comes back if it is opened again)";
       archive.addEventListener("click", function () { archiveSession(s.key, archive); });
-      actionCell.appendChild(archive);
-      tr.appendChild(actionCell);
-      tbody.appendChild(tr);
-      if (!lastDir) lastDir = dirName(s.file);
+      foot.appendChild(archive);
+    }
+    if (opts.history) {
+      var open = element("a", "", "Open");
+      open.href = s.url;
+      foot.appendChild(open);
+    }
+    card.appendChild(foot);
+    return card;
+  }
+
+  function renderList(target, countEl, list, emptyText, opts) {
+    target.textContent = "";
+    countEl.textContent = list.length ? String(list.length) : "";
+    if (!list.length) {
+      target.appendChild(element("p", "empty", emptyText));
+      return;
+    }
+    list.forEach(function (s) {
+      target.appendChild(sessionCard(s, opts));
+      if (!lastDir && !s.workflow_id) lastDir = dirName(s.file);
     });
-    table.appendChild(tbody);
-    sessionsEl.appendChild(table);
+  }
+
+  function renderSessions() {
+    var byNewest = function (a, b) { return String(b.updated_at).localeCompare(String(a.updated_at)); };
+    var live = data.sessions.filter(function (s) { return s.status !== "ended"; }).sort(byNewest);
+    var done = data.sessions.filter(function (s) { return s.status === "ended"; }).sort(byNewest);
+    renderList(sessionsEl, $("sessionsCount"), live, "Nothing open. Ask your agent to run see-plan <file>.", { history: false });
+    renderList($("historyList"), $("historyCount"), done, "Nothing finished yet.", { history: true });
   }
 
   function render() {

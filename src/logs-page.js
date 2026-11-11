@@ -18,7 +18,7 @@ export function createLogsHtml({ baseUrl, projectKey = null, errorLogFile = "the
 <link rel="stylesheet" href="/logs.css">
 </head>
 <body data-base-url="${escapeHtml(baseUrl ?? "")}" data-error-log="${escapeHtml(errorLogFile)}">
-<nav id="pageNav" aria-label="Pages"><a href="/">Dashboard</a> <a href="${escapeHtml(errorsHref)}">Error logs</a></nav>
+<nav id="pageNav" aria-label="Pages"><a href="/">Dashboard</a><a href="/claude" aria-current="page">Claude logs</a><a href="${escapeHtml(errorsHref)}">Error logs</a></nav>
 <header id="top">
   <div id="identity">
     <p class="eyebrow">Claude session</p>

@@ -373,12 +373,92 @@ body {
 .severity-picker.compact .sev-hint { display: none; }
 .saved-severity { margin: 8px 0; }
 
-#pageNav {
-  display: flex;
-  gap: 16px;
-  padding: 8px max(16px, calc((100% - 960px) / 2));
-  font-size: 13px;
+/* ---- fixed navigation bar + gradient colour scheme ---- */
+:root {
+  --nav-h: 56px;
+  --grad-a: #7c4dff;
+  --grad-b: #3b82f6;
+  --grad-c: #14b8a6;
+  --nav-grad: linear-gradient(100deg, var(--grad-a), var(--grad-b) 55%, var(--grad-c));
+  --soft-grad: linear-gradient(135deg, rgba(124, 77, 255, 0.12), rgba(59, 130, 246, 0.1) 55%, rgba(20, 184, 166, 0.12));
 }
 
-#pageNav a { color: var(--accent); }
-.entry .label .sev-badge { margin-left: 8px; }
+@media (prefers-color-scheme: dark) {
+  :root {
+    --grad-a: #5b34d6;
+    --grad-b: #1f5fd1;
+    --grad-c: #0d8f82;
+    --soft-grad: linear-gradient(135deg, rgba(124, 77, 255, 0.22), rgba(59, 130, 246, 0.16) 55%, rgba(20, 184, 166, 0.2));
+  }
+}
+
+body {
+  background: var(--bg) var(--soft-grad) fixed;
+}
+
+#pageNav {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--nav-h);
+  padding: 0 max(16px, calc((100% - 960px) / 2));
+  background: var(--nav-grad);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+#pageNav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 18px;
+  border-radius: 999px;
+  color: #ffffff;
+  font-size: 16px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+#pageNav a:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+#pageNav a[aria-current="page"] {
+  background: rgba(255, 255, 255, 0.95);
+  color: #3a2a8a;
+}
+
+#pageNav a:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-offset: 2px;
+}
+
+#top {
+  top: var(--nav-h);
+  z-index: 2;
+  border-bottom: 0;
+  border-image: var(--nav-grad) 1;
+  border-bottom: 3px solid;
+  background: var(--surface) var(--soft-grad);
+}
+
+.eyebrow {
+  background: var(--nav-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.entry.user.text {
+  background: var(--user-bg) var(--soft-grad);
+  border-left-color: var(--grad-b);
+}
+
+@media (max-width: 520px) {
+  #pageNav a {
+    padding: 0 12px;
+    font-size: 15px;
+  }
+}

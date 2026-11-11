@@ -1,6 +1,9 @@
 import { escapeHtml } from "./markdown.js";
 
-/** The dashboard at `/`: features with their four-stage tracker, and loose review sessions. */
+/**
+ * The dashboard at `/`: features with their four-stage tracker (left), finished sessions (middle) and every
+ * open session (right).
+ */
 export function createHomeHtml({ baseUrl } = {}) {
   return `<!doctype html>
 <html lang="en">
@@ -12,22 +15,38 @@ export function createHomeHtml({ baseUrl } = {}) {
 </head>
 <body data-base-url="${escapeHtml(baseUrl ?? "")}">
 <header id="top">
-  <div>
-    <p class="eyebrow">see-plan</p>
-    <h1>Features and review sessions</h1>
+  <div class="brand">
+    <span class="logo" aria-hidden="true">&#9719;</span>
+    <div>
+      <h1>see-plan</h1>
+      <p class="tagline">Review what your agent plans, on a page.</p>
+    </div>
   </div>
-  <nav><a href="/claude">Claude logs</a> <a href="/errors">Error logs</a> <button id="newFeature" type="button" class="primary">New feature</button></nav>
+  <nav aria-label="Pages">
+    <a href="/" aria-current="page">Dashboard</a>
+    <a href="/claude">Claude logs</a>
+    <a href="/errors">Error logs</a>
+    <button id="newFeature" type="button" class="primary">+ New feature</button>
+  </nav>
 </header>
 <p id="status" role="status" aria-live="polite"></p>
-<section aria-labelledby="featuresTitle">
-  <h2 id="featuresTitle">Features</h2>
-  <p class="hint">Each feature runs four stages, each with its own Claude session: Plan → Interrogation → Implementation → Verification. A stage opens when the one before it is approved or skipped.</p>
-  <div id="features"></div>
-</section>
-<section aria-labelledby="sessionsTitle">
-  <h2 id="sessionsTitle">Review sessions</h2>
-  <div id="sessions"></div>
-</section>
+<div id="layout">
+  <main id="main" aria-labelledby="featuresTitle">
+    <h2 id="featuresTitle">Features</h2>
+    <p class="hint">Each feature runs four stages, each with its own Claude session: Plan → Interrogation → Implementation → Verification. A stage opens when the one before it is approved or skipped.</p>
+    <div id="features"></div>
+  </main>
+  <aside id="history" aria-labelledby="historyTitle">
+    <h2 id="historyTitle">History <span class="count" id="historyCount"></span></h2>
+    <p class="hint">Finished sessions, newest first. Open one to read it or resume it.</p>
+    <div id="historyList"></div>
+  </aside>
+  <aside id="sessionsPane" aria-labelledby="sessionsTitle">
+    <h2 id="sessionsTitle">Sessions <span class="count" id="sessionsCount"></span></h2>
+    <p class="hint">Everything open now, including each feature's stages.</p>
+    <div id="sessions"></div>
+  </aside>
+</div>
 <dialog id="featureDialog" aria-labelledby="featureDialogTitle">
   <form id="featureForm" method="dialog">
     <h2 id="featureDialogTitle">New feature</h2>

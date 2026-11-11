@@ -4,6 +4,23 @@
 
 The rest of the 2026-11-03 plan (`docs/superpowers/plans/2026-11-03-logs-sessions-plans-fixes.md`, Tasks 2–4): log hand-off, session management and plan management. Its stage inference for plan folders and its Claude-session cache shipped early (0.3.0, and again in 3.2.0).
 
+## [4.0.1] - 2026-11-11
+
+A usability release: WSL support, a clearer dashboard, and fewer sign-in screens. Not breaking.
+
+### Added
+- **WSL (Ubuntu on Windows):** Connect Claude opens Windows Terminal (`wt.exe`) in your distro, else tmux, else a command to copy. The page opens in your Windows browser through `wslview`, then `explorer.exe` (on PATH, then `/mnt/c`), also when WSLg is present. If no browser opens, see-plan prints a link to paste.
+- The installer ends with "open a new terminal, or run `exec $SHELL`", and on WSL says to keep projects inside WSL, not under `/mnt/c`.
+- **Dashboard:** three columns. Features on the left, **History** (finished sessions, with Open) in the middle, and **Sessions** (everything open, including each feature's stages) on the right. The header links to Claude logs and Error logs.
+- **Claude log page:** a fixed navigation bar with larger links and a gradient colour scheme, and a link to the Claude logs page itself.
+- **Sign-in page:** shows the most recent session (file name only, never the folder) with a light for whether Claude is connected, beside the sign-in steps. It refreshes every 5 seconds.
+
+### Changed
+- **Browsers stay signed in:** the cookie lasts 30 days and survives server restarts. It is derived from a separate `browser-key` saved in the state folder (readable only by you); delete that file to sign every browser out. The CLI token is still new on every start.
+
+### Security note
+- The sign-in page is visible without signing in and shows the most recent session's file name, stage, status and whether Claude is connected. It never shows the folder path.
+
 ## [4.0.0] - 2026-11-08
 
 Phases 2-4 of `docs/superpowers/plans/2026-11-04-trust-headless-paths-multi-output.md`.

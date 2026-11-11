@@ -50,7 +50,13 @@ export async function openUrl(url, { platform = process.platform, spawnFn = spaw
   const [command, args] = openCommand(u.href, platform, { wsl });
   const first = await trySpawn(spawnFn, command, args);
   if (first.opened || !wsl) return first;
-  // WSL without wslview: the Windows explorer opens the default browser.
-  const second = await trySpawn(spawnFn, "/mnt/c/Windows/explorer.exe", [u.href]);
-  return second.opened ? second : { opened: false, reason: `${first.reason}; ${second.reason}` };
+  // WSL without wslview: the Windows explorer opens the default browser. Try it on PATH (interop adds the
+  // Windows folders) and then at the usual path, so a Windows folder that is not C: still works.
+  const reasons = [first.reason];
+  for (const exe of ["explorer.exe", "/mnt/c/Windows/explorer.exe"]) {
+    const r = await trySpawn(spawnFn, exe, [u.href]);
+    if (r.opened) return r;
+    reasons.push(r.reason);
+  }
+  return { opened: false, reason: reasons.join("; ") };
 }

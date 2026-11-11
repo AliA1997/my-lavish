@@ -164,3 +164,18 @@ test("launchClaude spawns detached powershell", async () => {
   assert.ok(!calls[0].args.some((a) => /dangerously/.test(a)));
   assert.equal(unrefs, 1);
 });
+
+import { buildWslTerminalLaunch, chooseStrategy as chooseStrategyWsl } from "../src/claude-launcher.js";
+
+test("WSL without a desktop picks the terminal strategy (Windows Terminal), not copy", () => {
+  const wsl = { gui: false, remote: false, ci: false, tmux: false, wsl: true, reasons: [] };
+  assert.equal(chooseStrategyWsl(wsl).strategy, "terminal");
+  assert.equal(chooseStrategyWsl({ ...wsl, tmux: true }).strategy, "tmux", "tmux still wins inside tmux");
+  assert.equal(chooseStrategyWsl({ ...wsl, wsl: false }).strategy, "copy");
+});
+
+test("buildWslTerminalLaunch runs this distro in Windows Terminal and escapes ';'", () => {
+  const b = buildWslTerminalLaunch({ wt: "/mnt/c/wt.exe", distro: "Ubuntu", cwd: "/home/a/p", argv: ["/usr/bin/claude", "--session-id", "id", "a; b"] });
+  assert.equal(b.command, "/mnt/c/wt.exe");
+  assert.deepEqual(b.args, ["new-tab", "wsl.exe", "-d", "Ubuntu", "--cd", "/home/a/p", "--", "/usr/bin/claude", "--session-id", "id", "a\\; b"]);
+});

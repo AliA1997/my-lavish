@@ -142,6 +142,15 @@ export async function whichOf(name, { execFileFn = execFile } = {}) {
   return line ?? null;
 }
 
+/**
+ * WSL: Windows Terminal (`wt.exe`, reachable through interop) running this distro. Windows Terminal reads
+ * ";" as its own command separator, so a literal one in an argument is written as \; .
+ */
+export function buildWslTerminalLaunch({ wt, distro, cwd, argv }) {
+  const lit = (a) => String(a).replace(/;/g, "\\;");
+  return { command: wt, args: ["new-tab", "wsl.exe", ...(distro ? ["-d", distro] : []), "--cd", cwd, "--", ...argv].map(lit) };
+}
+
 export async function findTerminal({ which = (n) => whichOf(n) } = {}) {
   for (const name of LINUX_TERMINALS) {
     const p = await which(name);
@@ -211,6 +220,7 @@ export function chooseStrategy(environment, settings = {}) {
   if (launcher !== "auto") return { strategy: launcher, reasons: [`MY_LAVISH_LAUNCHER=${launcher}`, ...reasons] };
   if (env.gui) return { strategy: "terminal", reasons };
   if (env.tmux) return { strategy: "tmux", reasons };
+  if (env.wsl && !env.remote && !env.ci) return { strategy: "terminal", reasons }; // Windows Terminal, when it is there
   return { strategy: "copy", reasons };
 }
 
@@ -245,7 +255,7 @@ export async function claudeStatus({ platform = process.platform, findClaude: fi
   if (strategy === "terminal") {
     if (platform === "win32") launch = "powershell";
     else if (platform === "darwin") launch = "osascript";
-    else if (!settings.terminal && !(await findTerminal(which ? { which } : {}))) launch = "copy";
+    else if (!settings.terminal && !(await findTerminal(which ? { which } : {})) && !(environment?.wsl && await (which ?? whichOf)("wt.exe"))) launch = "copy";
   }
   const out = { platform, launch, claude_found: Boolean(claudePath), claude_path: claudePath, strategy, strategy_reasons: reasons };
   if (launch === "copy" && strategy === "terminal") out.strategy_reasons = [...reasons, "no terminal program was found (x-terminal-emulator, gnome-terminal, konsole, xterm)"];
@@ -299,8 +309,13 @@ export async function launchClaude(
     built = { command: config.terminal[0], args: expandTerminal(config.terminal, [claudePath, flag, sessionId, text]).slice(1), env: { ...process.env } };
   } else {
     const terminal = platform === "linux" ? (process.env.TERMINAL && !/[\s;&|]/.test(process.env.TERMINAL) ? await (which ?? whichOf)(process.env.TERMINAL) : null) ?? await findTerminal(which ? { which } : {}) : undefined;
-    built = buildClaudeLaunch({ file, sessionId, claudePath, platform, resume, cwd, terminal, prompt: text });
-    if (built.copy) return copy("no terminal program was found");
+    const wt = platform === "linux" && !terminal && environment?.wsl ? await (which ?? whichOf)("wt.exe") : null;
+    if (wt) {
+      built = { ...buildWslTerminalLaunch({ wt, distro: process.env.WSL_DISTRO_NAME, cwd, argv: [claudePath, flag, sessionId, text] }), env: { ...process.env } };
+    } else {
+      built = buildClaudeLaunch({ file, sessionId, claudePath, platform, resume, cwd, terminal, prompt: text });
+      if (built.copy) return copy(environment?.wsl ? "no terminal was found in WSL (Windows Terminal, wt.exe, is not reachable)" : "no terminal program was found");
+    }
   }
   const child = spawnFn(built.command, built.args, { cwd, env: built.env, stdio: "ignore", ...(platform === "win32" ? { windowsHide: true } : { detached: true }) });
   child.on?.("error", () => {});

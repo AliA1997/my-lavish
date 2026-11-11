@@ -80,5 +80,11 @@ case ":$PATH:" in
     esac
     echo "Add it to your PATH, for example:"
     echo "  echo 'export PATH=\"\$HOME/.see-plan/bin:\$PATH\"' >> $shell_rc"
+    echo "Then open a new terminal, or run: exec \$SHELL"
     ;;
 esac
+if [ -n "${WSL_DISTRO_NAME:-}" ]; then
+  echo "WSL detected (${WSL_DISTRO_NAME}). Keep your projects inside WSL (for example ~/projects), not under /mnt/c: file watching is unreliable there."
+  echo "The page opens in your Windows browser. If it does not, run: see-plan url"
+fi
+echo "Next: see-plan --help"

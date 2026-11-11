@@ -16,7 +16,7 @@ import { serverSpawnArgs } from "./assets.js";
 import { VERSION } from "./version.js";
 import { pathRows, readConfig, resolvePaths } from "./paths.js";
 import { startServerProcess } from "./server-launcher.js";
-import { createToken, readRuntimeFile, removeRuntimeFile, writeRuntimeFile } from "./auth.js";
+import { createToken, loadBrowserKey, readRuntimeFile, removeRuntimeFile, writeRuntimeFile } from "./auth.js";
 import { createConsoleLog } from "./console-log.js";
 import { createErrorStore, errorSearchEnabled, pineconeSettings } from "./error-store.js";
 import { DESIGN_TEXT, PLAYBOOKS, HOME_USAGE } from "./guidance.js";
@@ -518,8 +518,11 @@ async function showInBrowser(conn, next, flags, io) {
   const environment = detectEnvironment({ env: io.env });
   if (!canOpenBrowser(environment)) return { opened: false, headless: true, reason: environment.reasons.join("; ") || "no desktop" };
   const link = await signInUrl(conn, next);
-  const r = await openUrl(link, { wsl: environment.wsl && !environment.gui });
-  if (!r.opened) io.stderr.write(`Could not open a browser: ${r.reason}\n`);
+  const r = await openUrl(link, { wsl: environment.wsl });
+  if (!r.opened) {
+    io.stderr.write(`Could not open a browser: ${r.reason}\n`);
+    io.stderr.write(`${environment.wsl ? "Copy this link into a browser on Windows" : "Open this link in a browser"} (it works once, for a minute): ${link}\n`);
+  }
   return r;
 }
 
@@ -854,17 +857,18 @@ async function cmdServer(io) {
   await fs.promises.mkdir(stateDir, { recursive: true });
   const mode = SERVER_MODES.has(io.env.SEE_PLAN_SERVER_MODE) ? io.env.SEE_PLAN_SERVER_MODE : "foreground";
   const token = createToken();
+  const browserKey = await loadBrowserKey(stateDir);
   const store = new SessionStore(stateDir);
   // S4: a readable console log when a person watches (window, tmux, `see-plan server` by hand), mirrored to
   // server.log. Hidden mode already writes stderr to server.log. Secrets are redacted defensively.
   const tty = Boolean(io.stderr.isTTY ?? process.stderr.isTTY) && mode !== "hidden";
   const mirror = mode === "hidden" ? null : await openLogMirror(paths);
   const pinecone = pineconeSettings(io.env);
-  const consoleLog = createConsoleLog({ tty, write: (s) => io.stderr.write(s), mirror, secrets: [token, ...(pinecone.apiKey ? [pinecone.apiKey] : [])] });
+  const consoleLog = createConsoleLog({ tty, write: (s) => io.stderr.write(s), mirror, secrets: [token, browserKey, ...(pinecone.apiKey ? [pinecone.apiKey] : [])] });
   // Pinecone when PINECONE_API_KEY is set and USE_PINECONE=true; otherwise the local error-log.json.
   const errorStore = await createErrorStore({ file: errorLogFile, env: io.env, log: consoleLog.log, appVersion: VERSION });
   const server = createServer({
-    store, stateDir, port, idleTimeoutMs, exitOnIdle: true, version: VERSION, errorLogFile, errorStore, errorSearch: errorSearchEnabled(io.env), logDir, token,
+    store, stateDir, port, idleTimeoutMs, exitOnIdle: true, version: VERSION, errorLogFile, errorStore, errorSearch: errorSearchEnabled(io.env), logDir, token, browserKey,
     allowedHosts: allowedHostsOf(io.env),
     launcherConfig: launcherSettings(io.env, readConfig(paths)),
     log: consoleLog.log,

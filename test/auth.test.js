@@ -206,7 +206,7 @@ test("the sign-in link: a bearer-only nonce, once, then an HttpOnly SameSite=Str
   assert.equal(ok.status, 303);
   assert.equal(ok.headers.location, `/session/${key}`);
   const set = String(ok.headers["set-cookie"]);
-  assert.match(set, new RegExp(`^${cookieNameFor(port)}=[0-9a-f]{64}; HttpOnly; SameSite=Strict; Path=/$`));
+  assert.match(set, new RegExp(`^${cookieNameFor(port)}=[0-9a-f]{64}; HttpOnly; SameSite=Strict; Path=/; Max-Age=\\d+$`));
   assert.ok(!set.includes(srv.token), "the cookie is not the token");
   assert.equal((await raw(port, `/auth?t=${nonce}&next=${next}`)).status, 401, "used once");
   const late = await mint();
@@ -253,4 +253,40 @@ test("allowed hosts never widen access without the token (no option turns the to
   const { port } = await setup(t, { allowedHosts: ["*", ""] });
   assert.equal((await raw(port, "/api/sessions", { headers: { host: "anything.example" } })).status, 403, "no wildcard");
   assert.equal((await rawFetch(`http://127.0.0.1:${port}/api/sessions`)).status, 401);
+});
+
+test("the browser key is saved once and reused, so a restart keeps the browser signed in", async (t) => {
+  const { loadBrowserKey, BROWSER_KEY_FILE } = await import("../src/auth.js");
+  const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "mla-bk-"));
+  t.after(() => fs.promises.rm(dir, { recursive: true, force: true }));
+  const acl = { execFileFn: (c, a, o, cb) => cb(null) };
+  const first = await loadBrowserKey(dir, acl);
+  assert.match(first, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(await loadBrowserKey(dir, acl), first, "the second start reads the same key");
+  assert.equal((await fs.promises.readFile(path.join(dir, BROWSER_KEY_FILE), "utf8")).trim(), first);
+  await fs.promises.writeFile(path.join(dir, BROWSER_KEY_FILE), "garbage");
+  assert.notEqual(await loadBrowserKey(dir, acl), "garbage", "a damaged file is replaced");
+  // An unwritable folder still yields a working one-start key.
+  const blocker = path.join(dir, "file");
+  await fs.promises.writeFile(blocker, "x");
+  assert.match(await loadBrowserKey(path.join(blocker, "sub"), acl), /^[A-Za-z0-9_-]{43}$/);
+});
+
+test("a cookie made from the browser key still works after the server restarts with a new token", async (t) => {
+  const key = createToken();
+  const { srv, port, key: sessionKey } = await setup(t, { browserKey: key });
+  const cookie = `${cookieNameFor(port)}=${cookieValueFor(key)}`;
+  assert.equal((await raw(port, `/api/${sessionKey}/status`, { headers: { cookie } })).status, 200);
+  assert.equal((await raw(port, `/api/${sessionKey}/status`, { headers: { cookie: `${cookieNameFor(port)}=${cookieValueFor(srv.token)}` } })).status, 401, "the per-start token no longer makes the cookie");
+});
+
+test("the sign-in page shows the most recent session by file name only, and whether Claude is connected", async (t) => {
+  const { port, tmp } = await setup(t);
+  const page = await raw(port, "/");
+  assert.equal(page.status, 401);
+  assert.match(page.text, /Most recent session/);
+  assert.match(page.text, /class="file">a\.html</);
+  assert.ok(!page.text.includes(tmp), "the folder path is never shown");
+  assert.match(page.text, /Claude is not connected/);
+  assert.match(page.text, /see-plan url/);
 });
